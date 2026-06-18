@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <title>Giải Đấu Cờ Vua Kéo Co</title>
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.css">
+    <script src="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
+    <script src="/socket.io/socket.io.js"></script>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="victoryModal">
+        <h1 id="victoryText">🏆 VÔ ĐỊCH TOÀN CÕI 🏆</h1>
+        <button id="backToLobbyBtn">Trở về sảnh chính</button>
+    </div>
+
+    <div id="app">
+        <div id="lobby">
+            <h2>🔥 Cờ Vua Kéo Co - Tournament 🔥</h2>
+            <div class="settings-box">
+                <label>Tên kỳ thủ (Bắt buộc):</label>
+                <input type="text" id="playerName" placeholder="Nhập tên của bạn..." maxlength="15">
+
+                <label>Cấp độ bài tập:</label>
+                <select id="levelSelect">
+                    <option value="1">Cấp độ 1 (Elo 1400 - 1500)</option>
+                    <option value="2">Cấp độ 2 (Elo 1501 - 1700)</option>
+                    <option value="3">Cấp độ 3 (Elo 1701 - 1800)</option>
+                </select>
+                
+                <label>Số vạch để thắng (3 - 10):</label>
+                <input type="number" id="winScoreInput" min="3" max="10" value="3">
+            </div>
+
+            <button id="createBtn">Tạo Giải Đấu Mới</button>
+            <hr style="margin: 25px 0;">
+            <input type="text" id="roomCode" placeholder="Mã phòng..." maxlength="4">
+            <button id="joinBtn">Vào Giải</button>
+            <p id="lobbyMsg"></p>
+        </div>
+
+        <div id="waitingRoom" style="display: none;">
+            <h2>Mã Giải Đấu: <strong id="waitRoomCode" style="color:#d9534f; font-size: 30px;"></strong></h2>
+            <p>Chia sẻ mã này cho bạn bè để rủ họ vào giải!</p>
+            <div class="settings-box">
+                <label>Danh sách tuyển thủ tham gia:</label>
+                <ul id="playerList"></ul>
+            </div>
+            <button id="startTournamentBtn" style="display: none;">Bắt Đầu Bốc Thăm & Đấu</button>
+            <p id="waitStatus">Đang chờ chủ phòng bắt đầu...</p>
+        </div>
+
+        <div id="bracketArea" style="display: none;">
+            <h2>Sơ Đồ Giải Đấu</h2>
+            <div id="bracketContent"></div>
+            <p id="bracketStatus">Chuẩn bị vào trận đấu...</p>
+        </div>
+
+        <div id="gameArea" style="display: none;">
+            <div id="roomInfo">Chạm mốc: <strong id="displayWinScore"></strong> vạch</div>
+            
+            <div id="tugOfWar">
+                <div class="player">👦 Bạn</div>
+                <div class="rope">
+                    <div class="center-mark"></div>
+                    <div id="marker">
+                        <img src="https://upload.wikimedia.org/wikipedia/commons/2/21/Flag_of_Vietnam.svg" alt="Cờ">
+                    </div> 
+                </div>
+                <div class="player" id="opponentNameDisplay">Đối thủ 👧</div>
+            </div>
+
+            <div id="board" style="width: 400px; margin: 20px auto;"></div>
+            <div id="status">Tập trung giải cờ...</div>
+        </div>
+    </div>
+    
+    <script src="main.js"></script>
+</body>
+</html>

@@ -1,0 +1,42 @@
+body { font-family: sans-serif; text-align: center; background-color: #2c3e50; margin: 0; color: #ecf0f1; }
+#app { max-width: 800px; margin: 20px auto; padding: 20px; }
+
+#lobby, #waitingRoom, #bracketArea, #gameArea { 
+    background: #ecf0f1; padding: 30px; border-radius: 10px; color: #333;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.3); 
+}
+
+.settings-box { background: white; border: 1px solid #ddd; border-radius: 8px; padding: 15px; margin-bottom: 20px; text-align: left; }
+.settings-box label { display: block; font-weight: bold; margin: 10px 0 5px; color: #333; }
+.settings-box select, .settings-box input { width: 100%; padding: 10px; font-size: 16px; border-radius: 5px; border: 1px solid #ccc; box-sizing: border-box; }
+
+button { padding: 12px 25px; font-size: 16px; cursor: pointer; background: #e74c3c; color: white; border: none; border-radius: 5px; font-weight: bold; transition: 0.2s; }
+button:hover { background: #c0392b; transform: scale(1.05); }
+
+#roomCode { padding: 12px; font-size: 16px; width: 150px; text-align: center; margin-right: 10px; }
+#lobbyMsg { color: #e74c3c; font-weight: bold; margin-top: 15px; }
+#playerList { list-style: none; padding: 0; font-size: 18px; font-weight: bold; color: #2980b9; }
+#playerList li { padding: 5px 0; border-bottom: 1px dashed #ccc; }
+
+/* CSS cho Nhánh Đấu (Bracket) */
+#bracketContent { display: flex; gap: 20px; justify-content: center; overflow-x: auto; padding: 20px 0; align-items: stretch; }
+.bracket-round { display: flex; flex-direction: column; gap: 20px; justify-content: space-around; }
+.bracket-round h3 { margin: 0 0 10px 0; color: #8e44ad; }
+.match-box, .match-bye { border: 2px solid #bdc3c7; padding: 10px; border-radius: 8px; background: white; width: 160px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+.match-bye { border-style: dashed; opacity: 0.8; background: #f9f9f9; }
+.match-player { font-weight: bold; padding: 5px; border-bottom: 1px solid #ecf0f1; }
+.match-player:last-child { border-bottom: none; }
+.match-vs { font-size: 12px; color: #7f8c8d; margin: 2px 0; }
+.winner-text { display: block; font-size: 12px; color: #27ae60; font-weight: bold; margin-top: 5px; text-transform: uppercase; }
+
+/* Kéo co */
+#tugOfWar { display: flex; align-items: center; justify-content: space-between; margin: 30px 0; padding: 20px; background: white; border-radius: 15px; box-shadow: 0 6px 12px rgba(0,0,0,0.15); }
+.rope { position: relative; width: 400px; height: 18px; background: #8B4513; border-radius: 9px; box-shadow: inset 0 3px 5px rgba(0,0,0,0.4); }
+.center-mark { position: absolute; left: 50%; top: -10px; width: 4px; height: 38px; background: #222; }
+#marker { position: absolute; left: 50%; top: -25px; transform: translateX(-50%); transition: left 0.2s ease-out; z-index: 10; }
+#marker img { width: 65px; height: auto; border-radius: 3px; box-shadow: 0 3px 6px rgba(0,0,0,0.3); }
+.player { font-size: 20px; font-weight: 900; color: #c0392b; width: 100px;}
+#status { font-size: 18px; font-weight: bold; margin-top: 15px; color: #2980b9; }
+
+#victoryModal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.9); z-index: 9999; flex-direction: column; justify-content: center; align-items: center; }
+#victoryText { font-size: 4rem; color: #f1c40f; text-shadow: 0 0 20px #e67e22, 0 0 40px #e67e22; margin-bottom: 40px; text-transform: uppercase; text-align: center; }
