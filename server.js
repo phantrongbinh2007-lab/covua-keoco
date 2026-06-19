@@ -118,7 +118,6 @@ io.on('connection', (socket) => {
         if (!room) return;
 
         let match = room.currentRoundMatches.find(m => m.p1?.id === socket.id || m.p2?.id === socket.id);
-        
         if (!match || match.winner || match.puzzleRound !== data.puzzleRound) return;
 
         match.puzzleRound++; 
@@ -139,6 +138,20 @@ io.on('connection', (socket) => {
             io.to(match.p1.id).emit('update_game', { ropePosition: match.ropePosition, puzzleSeed: nextSeed, puzzleRound: match.puzzleRound });
             io.to(match.p2.id).emit('update_game', { ropePosition: match.ropePosition, puzzleSeed: nextSeed, puzzleRound: match.puzzleRound });
         }
+    });
+
+    // 🚀 TÍNH NĂNG MỚI: Bắn tín hiệu Emoji sang đối thủ
+    socket.on('sendEmoji', (data) => {
+        const room = rooms[data.roomCode];
+        if (!room) return;
+        let match = room.currentRoundMatches.find(m => m.p1?.id === socket.id || m.p2?.id === socket.id);
+        if (!match || match.winner) return;
+
+        // Tìm ID của đối thủ
+        let opponentId = (socket.id === match.p1.id) ? match.p2.id : match.p1.id;
+        
+        // Bắn emoji sang cho người kia
+        io.to(opponentId).emit('receiveEmoji', data.emoji);
     });
 
     function checkAndAdvanceTournament(room, roomCode) {
