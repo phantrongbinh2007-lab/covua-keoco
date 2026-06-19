@@ -8,10 +8,9 @@ let currentPuzzle = null;
 let currentMoveIndex = 0; 
 let currentWinScore = 3; 
 
-// Biến chống lỗi tương tranh
 let currentPuzzleRound = 1; 
 let computerMoveTimer = null; 
-let amIP1 = true; // Trạng thái kéo cờ
+let amIP1 = true; 
 
 $(document).ready(function() {
     $('#createBtn').on('click', () => {
@@ -45,7 +44,6 @@ $(document).ready(function() {
     $('#backToLobbyBtn').on('click', () => { window.location.reload(); });
 });
 
-// Chuyển UI
 socket.on('roomCreated', (data) => { 
     myRoomCode = data.roomCode; 
     $('#lobby').hide();
@@ -66,7 +64,6 @@ socket.on('updateWaitingRoom', (players) => {
 
 socket.on('errorMsg', (msg) => { $('#lobbyMsg').text(msg); });
 
-// Hiển thị Sơ đồ nhánh đấu
 socket.on('showBracket', (bracket) => {
     $('#waitingRoom').hide();
     $('#gameArea').hide();
@@ -105,14 +102,13 @@ function renderBracket(bracket) {
     $('#bracketContent').html(html);
 }
 
-// Bắt đầu 1 Match
 socket.on('gameStart', (data) => {
     $('#bracketArea').hide();
     $('#gameArea').show();
     
     currentWinScore = data.winScore;
     currentPuzzleRound = data.puzzleRound;
-    amIP1 = data.isP1; // Cực kỳ quan trọng để lật ngược hướng kéo co
+    amIP1 = data.isP1; 
 
     $('#displayWinScore').text(currentWinScore);
     $('#opponentNameDisplay').text(data.opponentName + " 👧");
@@ -130,12 +126,10 @@ socket.on('gameStart', (data) => {
     });
 });
 
-// Dành cho người bị lẻ
 socket.on('byeMatch', () => {
     $('#bracketStatus').html("<strong style='color:green;'>Bạn được đặc cách vòng này! Đang chờ đối thủ khác thi đấu...</strong>");
 });
 
-// Đồng bộ game
 socket.on('update_game', (data) => {
     currentPuzzleRound = data.puzzleRound;
     updateRopeUI(data.ropePosition);
@@ -143,7 +137,6 @@ socket.on('update_game', (data) => {
     loadPuzzle(data.puzzleSeed);
 });
 
-// Trận nhỏ kết thúc, trở về nhánh
 socket.on('matchResult', (data) => {
     isMyTurnToSolve = false; 
     $('#gameArea').hide();
@@ -152,16 +145,12 @@ socket.on('matchResult', (data) => {
     renderBracket(data.bracket);
 });
 
-// Toàn giải kết thúc
 socket.on('tournamentOver', (data) => {
     $('#victoryText').html(`🏆 CHÚC MỪNG 🏆<br>${data.champion} ĐÃ VÔ ĐỊCH GIẢI ĐẤU!`);
     $('#victoryModal').css('display', 'flex');
 });
 
-// Logic kéo co (Luôn ép cờ dịch trái/phải chính xác theo phe)
 function updateRopeUI(position) {
-    // Nếu bạn là P1 (âm là thắng), P2 (dương là thắng). 
-    // Trick: Đảo ngược position nếu là P2, để UI luôn hiểu BẠN kéo về bên trái.
     let visualPos = amIP1 ? position : -position;
     let stepPercentage = 45 / currentWinScore; 
     let percent = 50 + (visualPos * stepPercentage);
@@ -177,7 +166,7 @@ function loadPuzzle(seed) {
     game.load(currentPuzzle.fen);
     board.position(currentPuzzle.fen, false);
     
-    let playerColor = game.turn() === 'w' ? 'white' : 'black';
+    let playerColor = game.turn() === 'w' ? 'black' : 'white';
     board.orientation(playerColor);
 
     if (computerMoveTimer) clearTimeout(computerMoveTimer);
@@ -222,7 +211,6 @@ function onDrop(source, target) {
         currentMoveIndex++;
         if (currentMoveIndex === currentPuzzle.solution.length) {
             $('#status').text("Tuyệt vời! Đang giật dây kéo co...");
-            // Gửi kèm puzzleRound để chống lỗi Race Condition
             socket.emit('solved_puzzle', { roomCode: myRoomCode, puzzleRound: currentPuzzleRound });
         } else {
             $('#status').text("Chính xác! Đợi máy phản đòn...");
