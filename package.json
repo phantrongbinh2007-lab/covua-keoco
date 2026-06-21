@@ -6,12 +6,16 @@
   "scripts": {
     "start": "node server.js"
   },
-  "keywords": ["chess", "tug-of-war"],
+  "keywords": [
+    "chess",
+    "tug-of-war"
+  ],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
     "express": "^5.2.1",
+    "firebase": "^12.15.0",
     "socket.io": "^4.2.0"
   }
 }

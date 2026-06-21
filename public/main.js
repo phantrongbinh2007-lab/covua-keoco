@@ -12,7 +12,21 @@ let computerMoveTimer = null;
 let amIP1 = true; 
 let selectedSquare = null;
 
+// HỆ THỐNG TOKEN (RECONNECT)
+let myToken = localStorage.getItem('chessTugToken');
+if (!myToken) {
+    myToken = Math.random().toString(36).substring(2, 15);
+    localStorage.setItem('chessTugToken', myToken);
+}
+
 $(document).ready(function() {
+    // Kiểm tra xem trước đó có đang trong phòng nào không để Reconnect
+    let savedRoom = sessionStorage.getItem('currentRoomCode');
+    if (savedRoom) {
+        myRoomCode = savedRoom;
+        socket.emit('reconnectUser', { roomCode: savedRoom, token: myToken });
+    }
+
     $('#createBtn').on('click', () => {
         const name = $('#playerName').val().trim();
         if (!name) return $('#lobbyMsg').text("Vui lòng nhập tên của bạn!");
@@ -21,7 +35,8 @@ $(document).ready(function() {
         let winScore = parseInt($('#winScoreInput').val());
         if (isNaN(winScore) || winScore < 3) winScore = 3;
         
-        socket.emit('createRoom', { playerName: name, level: selectedLevel, winScore: winScore });
+        // Gửi token kèm theo
+        socket.emit('createRoom', { playerName: name, level: selectedLevel, winScore: winScore, token: myToken });
     });
 
     $('#joinBtn').on('click', () => {
@@ -30,7 +45,7 @@ $(document).ready(function() {
         
         const code = $('#roomCode').val();
         if (code.length === 4) {
-            socket.emit('joinRoom', { roomCode: code, playerName: name });
+            socket.emit('joinRoom', { roomCode: code, playerName: name, token: myToken });
             myRoomCode = code;
         } else {
             $('#lobbyMsg').text("Nhập đủ 4 số mã phòng!");
@@ -41,24 +56,29 @@ $(document).ready(function() {
         socket.emit('startTournament', myRoomCode);
     });
 
-    $('#backToLobbyBtn').on('click', () => { window.location.reload(); });
+    $('#backToLobbyBtn').on('click', () => { 
+        sessionStorage.removeItem('currentRoomCode'); // Xóa phòng khi game over
+        window.location.reload(); 
+    });
 
     $('#board').on('click', '.square-55d63', function() {
         let square = $(this).attr('data-square');
         if (square) handleSquareClick(square);
     });
 
-    // SỰ KIỆN: BẤM NÚT GỬI EMOJI
     $('.emoji-btn').on('click', function() {
         let emoji = $(this).attr('data-emoji');
-        socket.emit('sendEmoji', { roomCode: myRoomCode, emoji: emoji });
-        showFloatingEmoji(emoji, 'me'); // Hiện lên ở phe mình
+        socket.emit('sendEmoji', { roomCode: myRoomCode, token: myToken, emoji: emoji });
+        showFloatingEmoji(emoji, 'me');
     });
 });
 
 socket.on('roomCreated', (data) => { 
     myRoomCode = data.roomCode; 
+    sessionStorage.setItem('currentRoomCode', myRoomCode); // Lưu phòng vào phiên
     $('#lobby').hide();
+    $('#bracketArea').hide();
+    $('#gameArea').hide();
     $('#waitingRoom').show();
     $('#waitRoomCode').text(data.roomCode);
     if (data.isHost) {
@@ -74,9 +94,13 @@ socket.on('updateWaitingRoom', (players) => {
     });
 });
 
-socket.on('errorMsg', (msg) => { $('#lobbyMsg').text(msg); });
+socket.on('errorMsg', (msg) => { 
+    $('#lobbyMsg').text(msg); 
+    sessionStorage.removeItem('currentRoomCode'); 
+});
 
 socket.on('showBracket', (bracket) => {
+    $('#lobby').hide();
     $('#waitingRoom').hide();
     $('#gameArea').hide();
     $('#bracketArea').show();
@@ -114,6 +138,8 @@ function renderBracket(bracket) {
 }
 
 socket.on('gameStart', (data) => {
+    $('#lobby').hide();
+    $('#waitingRoom').hide();
     $('#bracketArea').hide();
     $('#gameArea').show();
     currentWinScore = data.winScore;
@@ -127,7 +153,7 @@ socket.on('gameStart', (data) => {
         puzzleList = puzzles;
         isMyTurnToSolve = true;
         updateRopeUI(data.ropePosition);
-        loadPuzzle(data.puzzleSeed);
+        loadPuzzle(data.puzzleSeed); // Nếu Reconnect, nó sẽ tải đúng Puzzle dở dang
     }).fail(() => {
         $('#status').text(`LỖI: Thiếu file "puzzles_level${data.level}.json"!`);
     });
@@ -153,28 +179,23 @@ socket.on('matchResult', (data) => {
 });
 
 socket.on('tournamentOver', (data) => {
+    sessionStorage.removeItem('currentRoomCode'); 
     $('#victoryText').html(`🏆 CHÚC MỪNG 🏆<br>${data.champion} ĐÃ VÔ ĐỊCH GIẢI ĐẤU!`);
     $('#victoryModal').css('display', 'flex');
 });
 
-// SỰ KIỆN: NHẬN EMOJI TỪ ĐỐI THỦ
 socket.on('receiveEmoji', (emoji) => {
     showFloatingEmoji(emoji, 'opponent');
 });
 
-// Hàm tạo hiệu ứng Emoji bay lượn
 function showFloatingEmoji(emoji, side) {
     let $emoji = $('<div class="floating-emoji"></div>').text(emoji);
-    
     if (side === 'me') {
-        $emoji.css({ bottom: '-20px', left: '10%' }); // Bay lên từ chữ "Bạn"
+        $emoji.css({ bottom: '-20px', left: '10%' }); 
     } else {
-        $emoji.css({ bottom: '-20px', right: '10%' }); // Bay lên từ chữ "Đối thủ"
+        $emoji.css({ bottom: '-20px', right: '10%' }); 
     }
-
     $('#tugOfWar').append($emoji);
-    
-    // Xóa emoji sau khi hết animation
     setTimeout(() => { $emoji.remove(); }, 1500);
 }
 
@@ -246,7 +267,7 @@ function handleSquareClick(square) {
             currentMoveIndex++;
             if (currentMoveIndex === currentPuzzle.solution.length) {
                 $('#status').text("Tuyệt vời! Đang giật dây kéo co...");
-                socket.emit('solved_puzzle', { roomCode: myRoomCode, puzzleRound: currentPuzzleRound });
+                socket.emit('solved_puzzle', { roomCode: myRoomCode, token: myToken, puzzleRound: currentPuzzleRound });
             } else {
                 $('#status').text("Chính xác! Đợi máy phản đòn...");
                 if (computerMoveTimer) clearTimeout(computerMoveTimer);
@@ -294,7 +315,7 @@ function onDrop(source, target) {
         currentMoveIndex++;
         if (currentMoveIndex === currentPuzzle.solution.length) {
             $('#status').text("Tuyệt vời! Đang giật dây kéo co...");
-            socket.emit('solved_puzzle', { roomCode: myRoomCode, puzzleRound: currentPuzzleRound });
+            socket.emit('solved_puzzle', { roomCode: myRoomCode, token: myToken, puzzleRound: currentPuzzleRound });
         } else {
             $('#status').text("Chính xác! Đợi máy phản đòn...");
             if (computerMoveTimer) clearTimeout(computerMoveTimer);
