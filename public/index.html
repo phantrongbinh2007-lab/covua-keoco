@@ -12,11 +12,25 @@
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <div id="victoryModal">
-        <h1 id="victoryText">🏆 VÔ ĐỊCH TOÀN CÕI 🏆</h1>
-        <button id="backToLobbyBtn">Trở về sảnh chính</button>
+    <div id="leaderboardModal" class="modal-overlay" style="display: none;">
+        <div class="modal-content">
+            <h2>🏆 BẢNG VÀNG KỲ THỦ 🏆</h2>
+            <div class="lb-tabs">
+                <button class="lb-tab active" data-tab="daily">Hôm Nay</button>
+                <button class="lb-tab" data-tab="weekly">Tuần Này</button>
+                <button class="lb-tab" data-tab="monthly">Tháng Này</button>
+            </div>
+            <div class="lb-body">
+                <table id="lbTable">
+                    <thead><tr><th>Top</th><th>Kỳ Thủ</th><th>Điểm</th></tr></thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+            <button id="closeLbBtn">Đóng Bảng</button>
+        </div>
     </div>
 
+    <div id="victoryModal"><h1 id="victoryText">🏆 VÔ ĐỊCH TOÀN CÕI 🏆</h1><button id="backToLobbyBtn">Trở về sảnh chính</button></div>
     <div class="ad-banner-side" id="ad-left">[ Banner Trái 160x600 ]</div>
     <div class="ad-banner-side" id="ad-right">[ Banner Phải 160x600 ]</div>
     <div class="ad-banner" id="ad-top">[ Khu Vực Đặt Banner Quảng Cáo Trên ]</div>
@@ -24,10 +38,11 @@
     <div id="app">
         <div id="lobby">
             <h2>🔥 Cờ Vua Kéo Co - Tournament 🔥</h2>
+            <button id="showLbBtn" class="pulse-btn">🏆 Xem Bảng Xếp Hạng 🏆</button>
+
             <div class="settings-box">
                 <label>Tên kỳ thủ (Bắt buộc):</label>
                 <input type="text" id="playerName" placeholder="Nhập tên của bạn..." maxlength="15">
-                
                 <label>Cấp độ bài tập:</label>
                 <select id="levelSelect">
                     <option value="1">Cấp độ 1 (Elo 1400 - 1500)</option>
@@ -36,7 +51,6 @@
                     <option value="4">Cấp độ 4 (Elo 1801 - 1900)</option>
                     <option value="5">Cấp độ 5 (Elo 1901 - 2000)</option>
                 </select>
-
                 <label>Số vạch để thắng (3 - 10):</label>
                 <input type="number" id="winScoreInput" min="3" max="10" value="3">
             </div>
@@ -50,12 +64,10 @@
         <div id="waitingRoom" style="display: none;">
             <h2>Mã Giải Đấu: <strong id="waitRoomCode" style="color:#d9534f; font-size: 30px;"></strong></h2>
             <p>Chia sẻ mã này cho bạn bè để rủ họ vào giải!</p>
-            <div class="settings-box">
-                <label>Danh sách tuyển thủ tham gia:</label>
-                <ul id="playerList"></ul>
-            </div>
-            <button id="startTournamentBtn" style="display: none;">Bắt Đầu Bốc Thăm & Đấu</button>
-            <p id="waitStatus">Đang chờ chủ phòng bắt đầu...</p>
+            <div class="settings-box"><label>Tuyển thủ tham gia:</label><ul id="playerList"></ul></div>
+            <button id="startTournamentBtn" style="display: none; margin-bottom: 10px;">Bắt Đầu Bốc Thăm & Đấu</button>
+            <button id="leaveRoomBtn" style="background: #7f8c8d; display: block; margin: 0 auto;">⬅ Hủy & Rời Phòng</button>
+            <p id="waitStatus" style="margin-top: 15px;">Đang chờ chủ phòng bắt đầu...</p>
         </div>
 
         <div id="bracketArea" style="display: none;">
@@ -65,8 +77,8 @@
         </div>
 
         <div id="gameArea" style="display: none;">
+            <button id="exitSpectateBtn" style="display:none; background: #95a5a6; margin-bottom: 15px;">⬅ Thoát Xem</button>
             <div id="roomInfo">Chạm mốc: <strong id="displayWinScore"></strong> vạch</div>
-            
             <div id="tugOfWar">
                 <div class="player">👦 Bạn</div>
                 <div class="rope">
@@ -79,10 +91,8 @@
                 </div>
                 <div class="player" id="opponentNameDisplay">Đối thủ 👧</div>
             </div>
-
             <div id="board" style="width: 400px; margin: 20px auto; max-width: 100%;"></div>
             <div id="status">Tập trung giải cờ...</div>
-
             <div id="emojiPanel">
                 <button class="emoji-btn" data-emoji="😂">😂</button>
                 <button class="emoji-btn" data-emoji="😭">😭</button>
@@ -93,11 +103,7 @@
     </div>
     
     <div class="ad-banner" id="ad-bottom">[ Khu Vực Đặt Banner Quảng Cáo Dưới ]</div>
-
-    <footer>
-        <p>Phát triển và thiết kế bởi <strong>Vua Lang Thang</strong> &copy; 2026</p>
-    </footer>
-
+    <footer><p>Phát triển và thiết kế bởi <strong>Vua Lang Thang</strong> &copy; 2026</p></footer>
     <script src="main.js"></script>
 </body>
 </html>
