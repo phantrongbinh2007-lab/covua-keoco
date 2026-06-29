@@ -57,6 +57,9 @@ function addScore(playerName, points) {
 }
 
 const rooms = {};
+const REGULAR_PUZZLE_TIME_MS = 60 * 1000;
+const SUDDEN_DEATH_TIME_MS = 30 * 1000;
+const MAX_REGULAR_DRAWS = 3;
 
 function normalizeRoomCode(code) {
     if (code == null) return '';
@@ -82,6 +85,17 @@ function generateNextRound(room) {
         });
     }
     room.currentRoundMatches = matches; room.bracket.push(matches);
+}
+
+function clearMatchTimer(match) {
+    if (match.timerId) {
+        clearTimeout(match.timerId);
+        match.timerId = null;
+    }
+}
+
+function decideDoubleLoss(match) {
+    match.winner = { token: null, id: null, name: 'Đồng thua', isDoubleLoss: true };
 }
 
 io.on('connection', (socket) => {
@@ -119,7 +133,10 @@ io.on('connection', (socket) => {
                 socket.emit('gameStart', {
                     level: room.level, winScore: room.winScore,
                     puzzleSeed: match.currentSeed, puzzleRound: match.puzzleRound, ropePosition: match.ropePosition,
-                    isP1: isP1, opponentName: (isP1 ? match.p2 : match.p1)?.name || '---'
+                    isP1: isP1, opponentName: (isP1 ? match.p2 : match.p1)?.name || '---',
+                    roundMode: match.roundMode || 'regular',
+                    timeLimitMs: match.timeLimitMs || REGULAR_PUZZLE_TIME_MS,
+                    deadlineAt: match.deadlineAt || null
                 });
             } else { socket.emit('showBracket', room.bracket); }
         }
@@ -211,15 +228,87 @@ io.on('connection', (socket) => {
         }
     });
 
+    function assignNextPuzzle(match, roomCode, options = {}) {
+        const mode = options.mode || 'regular';
+        const timeLimitMs = mode === 'sudden_death' ? SUDDEN_DEATH_TIME_MS : REGULAR_PUZZLE_TIME_MS;
+        clearMatchTimer(match);
+
+        match.roundMode = mode;
+        match.timeLimitMs = timeLimitMs;
+        match.currentSeed = Math.floor(Math.random() * 1000000);
+        match.deadlineAt = Date.now() + timeLimitMs;
+        match.hadMoveP1 = false;
+        match.hadMoveP2 = false;
+
+        match.timerId = setTimeout(() => {
+            handlePuzzleTimeout(roomCode, match);
+        }, timeLimitMs);
+
+        if (!options.silent) {
+            const payload = {
+                ropePosition: match.ropePosition,
+                puzzleSeed: match.currentSeed,
+                puzzleRound: match.puzzleRound,
+                roundMode: match.roundMode,
+                timeLimitMs: match.timeLimitMs,
+                deadlineAt: match.deadlineAt
+            };
+            if (options.message) payload.message = options.message;
+            io.to(match.p1.id).emit(options.payloadType || 'update_game', payload);
+            io.to(match.p2.id).emit(options.payloadType || 'update_game', payload);
+            io.to('watch_' + match.id).emit(options.payloadType || 'update_game', payload);
+        }
+    }
+
+    function resolveMatchWinner(room, roomCode, match, winner, reasonMessage) {
+        clearMatchTimer(match);
+        match.winner = winner;
+        if (!winner.isDoubleLoss) addScore(winner.name, 2);
+        io.to(match.p1.id).emit('matchResult', { winner: winner.name, bracket: room.bracket, reason: reasonMessage, isDoubleLoss: !!winner.isDoubleLoss });
+        io.to(match.p2.id).emit('matchResult', { winner: winner.name, bracket: room.bracket, reason: reasonMessage, isDoubleLoss: !!winner.isDoubleLoss });
+        io.to('watch_' + match.id).emit('spectateEnd', { winner: winner.name, bracket: room.bracket, reason: reasonMessage, isDoubleLoss: !!winner.isDoubleLoss });
+        checkAndAdvanceTournament(room, roomCode);
+    }
+
+    function handlePuzzleTimeout(roomCode, match) {
+        const room = rooms[roomCode];
+        if (!room || match.winner) return;
+
+        if (match.roundMode === 'sudden_death') {
+            decideDoubleLoss(match);
+            resolveMatchWinner(room, roomCode, match, match.winner, 'Hết giờ Sudden Death: đồng thua.');
+            return;
+        }
+
+        match.drawStreak = (match.drawStreak || 0) + 1;
+        match.puzzleRound += 1;
+
+        if (match.drawStreak >= MAX_REGULAR_DRAWS) {
+            assignNextPuzzle(match, roomCode, {
+                mode: 'sudden_death',
+                message: 'Sudden Death 30s: sai 1 nước là thua ngay.'
+            });
+            return;
+        }
+
+        assignNextPuzzle(match, roomCode, {
+            mode: 'regular',
+            message: 'Hết giờ: hòa puzzle, chuyển thế cờ mới.'
+        });
+    }
+
     function startNewRound(room, roomCode) {
         generateNextRound(room); io.to(roomCode).emit('showBracket', room.bracket);
         setTimeout(() => {
             room.currentRoundMatches.forEach(match => {
                 if (!match.isBye) {
-                    match.currentSeed = Math.floor(Math.random() * 1000000); 
-                    const matchData = { level: room.level, winScore: room.winScore, puzzleSeed: match.currentSeed, puzzleRound: match.puzzleRound, ropePosition: 0 };
-                    io.to(match.p1.id).emit('gameStart', { ...matchData, isP1: true, opponentName: match.p2.name });
-                    io.to(match.p2.id).emit('gameStart', { ...matchData, isP1: false, opponentName: match.p1.name });
+                    match.roundMode = 'regular';
+                    match.drawStreak = 0;
+                    match.puzzleRound = 1;
+                    match.ropePosition = 0;
+                    assignNextPuzzle(match, roomCode, { silent: true });
+                    io.to(match.p1.id).emit('gameStart', { level: room.level, winScore: room.winScore, isP1: true, opponentName: match.p2.name, ropePosition: 0, puzzleRound: match.puzzleRound, puzzleSeed: match.currentSeed, roundMode: match.roundMode, timeLimitMs: match.timeLimitMs, deadlineAt: match.deadlineAt });
+                    io.to(match.p2.id).emit('gameStart', { level: room.level, winScore: room.winScore, isP1: false, opponentName: match.p1.name, ropePosition: 0, puzzleRound: match.puzzleRound, puzzleSeed: match.currentSeed, roundMode: match.roundMode, timeLimitMs: match.timeLimitMs, deadlineAt: match.deadlineAt });
                 } else { io.to(match.p1.id).emit('byeMatch'); }
             });
         }, 5000);
@@ -233,19 +322,31 @@ io.on('connection', (socket) => {
             socket.join('watch_' + match.id); 
             socket.emit('spectateStart', {
                 level: room.level, winScore: room.winScore, puzzleSeed: match.currentSeed, 
-                puzzleRound: match.puzzleRound, ropePosition: match.ropePosition, p1Name: match.p1.name, p2Name: match.p2.name
+                puzzleRound: match.puzzleRound, ropePosition: match.ropePosition, p1Name: match.p1.name, p2Name: match.p2.name,
+                roundMode: match.roundMode || 'regular', timeLimitMs: match.timeLimitMs || REGULAR_PUZZLE_TIME_MS, deadlineAt: match.deadlineAt || null
             });
         }
     });
 
     socket.on('solved_puzzle', (data) => {
-        const rCode = String(data.roomCode).trim();
+        const rCode = normalizeRoomCode(data.roomCode);
         const room = rooms[rCode];
         if (!room) return;
         let match = room.currentRoundMatches.find(m => m.p1?.token === data.token || m.p2?.token === data.token);
         if (!match || match.winner || match.puzzleRound !== data.puzzleRound) return;
 
-        match.puzzleRound++; 
+        clearMatchTimer(match);
+        if (data.token === match.p1.token) match.hadMoveP1 = true;
+        else if (data.token === match.p2.token) match.hadMoveP2 = true;
+        match.puzzleRound++;
+
+        if (match.roundMode === 'sudden_death') {
+            match.drawStreak = 0;
+            const winner = data.token === match.p1.token ? match.p1 : match.p2;
+            resolveMatchWinner(room, rCode, match, winner, 'Sudden Death: giải đúng trước và chiến thắng!');
+            return;
+        }
+
         if (data.token === match.p1.token) match.ropePosition -= 1;
         else if (data.token === match.p2.token) match.ropePosition += 1;
 
@@ -254,17 +355,27 @@ io.on('connection', (socket) => {
         else if (match.ropePosition >= room.winScore) { match.winner = match.p2; matchOver = true; }
 
         if (matchOver) {
-            addScore(match.winner.name, 2); 
-            io.to(match.p1.id).emit('matchResult', { winner: match.winner.name, bracket: room.bracket });
-            io.to(match.p2.id).emit('matchResult', { winner: match.winner.name, bracket: room.bracket });
-            io.to('watch_' + match.id).emit('spectateEnd', { winner: match.winner.name, bracket: room.bracket }); 
-            checkAndAdvanceTournament(room, rCode);
+            match.drawStreak = 0;
+            resolveMatchWinner(room, rCode, match, match.winner, 'Đã đạt mốc kéo dây.');
         } else {
-            match.currentSeed = Math.floor(Math.random() * 1000000); 
-            const updateData = { ropePosition: match.ropePosition, puzzleSeed: match.currentSeed, puzzleRound: match.puzzleRound };
-            io.to(match.p1.id).emit('update_game', updateData);
-            io.to(match.p2.id).emit('update_game', updateData);
-            io.to('watch_' + match.id).emit('update_game', updateData); 
+            match.drawStreak = 0;
+            assignNextPuzzle(match, rCode, { mode: 'regular' });
+        }
+    });
+
+    socket.on('playerMistake', (data) => {
+        const rCode = normalizeRoomCode(data.roomCode);
+        const room = rooms[rCode];
+        if (!room) return;
+        const match = room.currentRoundMatches.find(m => m.p1?.token === data.token || m.p2?.token === data.token);
+        if (!match || match.winner || match.puzzleRound !== data.puzzleRound || match.roundMode !== 'sudden_death') return;
+
+        if (data.token === match.p1.token) {
+            match.hadMoveP1 = true;
+            resolveMatchWinner(room, rCode, match, match.p2, 'Sudden Death: đối thủ đi sai nước và thua ngay!');
+        } else {
+            match.hadMoveP2 = true;
+            resolveMatchWinner(room, rCode, match, match.p1, 'Sudden Death: đối thủ đi sai nước và thua ngay!');
         }
     });
 
@@ -279,12 +390,21 @@ io.on('connection', (socket) => {
     function checkAndAdvanceTournament(room, roomCode) {
         io.to(roomCode).emit('updateBracketOnly', room.bracket);
         if (room.currentRoundMatches.every(m => m.winner !== null)) {
-            room.activePlayers = room.currentRoundMatches.map(m => m.winner);
+            room.currentRoundMatches.forEach(clearMatchTimer);
+            room.activePlayers = room.currentRoundMatches
+                .map(m => (m.winner && !m.winner.isDoubleLoss ? m.winner : null))
+                .filter(Boolean);
+
             if (room.activePlayers.length === 1) {
                 addScore(room.activePlayers[0].name, 10); 
                 io.to(roomCode).emit('tournamentOver', { champion: room.activePlayers[0].name });
                 delete rooms[roomCode];
-            } else { setTimeout(() => { startNewRound(room, roomCode); }, 3000); }
+            } else if (room.activePlayers.length > 1) {
+                setTimeout(() => { startNewRound(room, roomCode); }, 3000);
+            } else {
+                io.to(roomCode).emit('tournamentOver', { champion: 'Không có nhà vô địch (đồng thua)' });
+                delete rooms[roomCode];
+            }
         }
     }
 });

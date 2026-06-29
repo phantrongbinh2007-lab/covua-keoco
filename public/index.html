@@ -12,6 +12,20 @@
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
+    <div id="rulesModal" class="modal-overlay" style="display: none;">
+        <div class="modal-content">
+            <h2>📜 Luật Trận Đấu</h2>
+            <ul class="rules-list">
+                <li>Mỗi puzzle có 60 giây.</li>
+                <li>Hết 60 giây mà không ai giải được: hòa puzzle, chuyển puzzle mới.</li>
+                <li>Sau 3 puzzle hòa liên tiếp: vào Sudden Death 30 giây (chỉ 1 lần).</li>
+                <li>Trong Sudden Death: ai đi sai 1 nước thua ngay.</li>
+                <li>Hết giờ Sudden Death mà chưa có người thắng: đồng thua.</li>
+            </ul>
+            <button id="closeRulesBtn">Đóng Luật</button>
+        </div>
+    </div>
+
     <div id="leaderboardModal" class="modal-overlay" style="display: none;">
         <div class="modal-content">
             <h2>🏆 BẢNG VÀNG KỲ THỦ 🏆</h2>
@@ -33,11 +47,11 @@
     <div id="victoryModal"><h1 id="victoryText">🏆 VÔ ĐỊCH TOÀN CÕI 🏆</h1><button id="backToLobbyBtn">Trở về sảnh chính</button></div>
     <div class="ad-banner-side" id="ad-left">[ Banner Trái 160x600 ]</div>
     <div class="ad-banner-side" id="ad-right">[ Banner Phải 160x600 ]</div>
-    <div class="ad-banner" id="ad-top">[ Khu Vực Đặt Banner Quảng Cáo Trên ]</div>
 
     <div id="app">
         <div id="lobby">
             <h2>🔥 Cờ Vua Kéo Co - Tournament 🔥</h2>
+            <button id="showRulesBtn" class="rules-btn">📜 Xem Luật Trận Đấu</button>
             <button id="showLbBtn" class="pulse-btn">🏆 Xem Bảng Xếp Hạng 🏆</button>
 
             <div class="settings-box">
@@ -79,6 +93,7 @@
         <div id="gameArea" style="display: none;">
             <button id="exitSpectateBtn" style="display:none; background: #95a5a6; margin-bottom: 15px;">⬅ Thoát Xem</button>
             <div id="roomInfo">Chạm mốc: <strong id="displayWinScore"></strong> vạch</div>
+            <div id="puzzleTimer">⏱️ 60s</div>
             <div id="tugOfWar">
                 <div class="player">👦 Bạn</div>
                 <div class="rope">
@@ -102,7 +117,6 @@
         </div>
     </div>
     
-    <div class="ad-banner" id="ad-bottom">[ Khu Vực Đặt Banner Quảng Cáo Dưới ]</div>
     <footer><p>Phát triển và thiết kế bởi <strong>Vua Lang Thang</strong> &copy; 2026</p></footer>
     <script src="main.js"></script>
 </body>

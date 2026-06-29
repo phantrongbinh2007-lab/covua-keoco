@@ -8,6 +8,8 @@ button { padding: 12px 25px; font-size: 16px; cursor: pointer; background: #e74c
 button:hover { background: #c0392b; transform: scale(1.05); }
 
 .pulse-btn { background: #f1c40f !important; color: #d35400 !important; width: 100%; margin-bottom: 25px; font-size: 20px; animation: pulsing 1.5s infinite; border: 2px solid #e67e22 !important; }
+.rules-btn { width: 100%; margin-bottom: 12px; background: #34495e; }
+.rules-btn:hover { background: #2c3e50; }
 @keyframes pulsing { 0% { transform: scale(1); box-shadow: 0 0 0 0 rgba(243, 156, 18, 0.7); } 70% { transform: scale(1.03); box-shadow: 0 0 0 15px rgba(243, 156, 18, 0); } 100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(243, 156, 18, 0); } }
 
 /* CHỐNG TÀNG HÌNH: Ép bóng ma hiển thị nổi bần bật */
@@ -36,6 +38,7 @@ button:hover { background: #c0392b; transform: scale(1.05); }
 .center-mark { position: absolute; left: 50%; top: -10px; width: 4px; height: 38px; background: #222; }
 .player { font-size: 20px; font-weight: 900; color: #c0392b; width: 100px;}
 #status { font-size: 18px; font-weight: bold; margin-top: 15px; color: #2980b9; }
+#puzzleTimer { margin-top: 10px; font-size: 20px; font-weight: 900; color: #8e44ad; }
 #marker { position: absolute; left: 50%; top: -35px; transform: translateX(-50%); transition: left 0.3s ease-out; z-index: 10; display: flex; align-items: flex-start; justify-content: center; }
 .king-piece { width: 55px; height: auto; filter: drop-shadow(0 4px 6px rgba(0,0,0,0.6)); animation: struggle 0.15s infinite alternate; }
 .sweat-drop { font-size: 22px; animation: sweat-drip 0.8s infinite; }
@@ -54,7 +57,6 @@ button:hover { background: #c0392b; transform: scale(1.05); }
 #victoryModal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.9); z-index: 9999; flex-direction: column; justify-content: center; align-items: center; }
 #victoryText { font-size: 4rem; color: #f1c40f; text-shadow: 0 0 20px #e67e22, 0 0 40px #e67e22; margin-bottom: 40px; text-transform: uppercase; text-align: center; }
 
-.ad-banner { max-width: 800px; margin: 10px auto; padding: 25px; background-color: #34495e; color: #95a5a6; border: 2px dashed #7f8c8d; border-radius: 10px; text-transform: uppercase; font-weight: bold; letter-spacing: 1px; }
 .ad-banner-side { position: fixed; top: 50%; transform: translateY(-50%); width: 160px; height: 600px; background-color: #34495e; color: #95a5a6; border: 2px dashed #7f8c8d; border-radius: 10px; display: flex; align-items: center; justify-content: center; text-transform: uppercase; font-weight: bold; z-index: 0; }
 #ad-left { left: 20px; }
 #ad-right { right: 20px; }
@@ -78,3 +80,6 @@ th { background: #34495e; color: white; position: sticky; top: 0; }
 td:first-child { font-weight: bold; color: #e74c3c; text-align: center; }
 #closeLbBtn { background: #95a5a6; width: 100%; }
 #closeLbBtn:hover { background: #7f8c8d; }
+.rules-list { text-align: left; padding-left: 20px; line-height: 1.6; }
+#closeRulesBtn { background: #95a5a6; width: 100%; }
+#closeRulesBtn:hover { background: #7f8c8d; }

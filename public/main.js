@@ -12,6 +12,9 @@ let computerMoveTimer = null;
 let amIP1 = true; 
 let selectedSquare = null;
 let isSpectator = false; 
+let currentRoundMode = 'regular';
+let puzzleDeadlineAt = null;
+let puzzleTimerInterval = null;
 
 let globalLeaderboard = { daily: {}, weekly: {}, monthly: {} };
 let currentLbTab = 'daily';
@@ -46,6 +49,29 @@ function whenSocketReady(callback) {
     if (!socket.active) socket.connect();
 }
 
+function stopPuzzleTimer() {
+    if (puzzleTimerInterval) {
+        clearInterval(puzzleTimerInterval);
+        puzzleTimerInterval = null;
+    }
+}
+
+function startPuzzleTimer(deadlineAt, timeLimitMs) {
+    puzzleDeadlineAt = deadlineAt || (Date.now() + (timeLimitMs || 60000));
+    stopPuzzleTimer();
+
+    const render = () => {
+        const remainingMs = Math.max(0, puzzleDeadlineAt - Date.now());
+        const seconds = Math.ceil(remainingMs / 1000);
+        const modeLabel = currentRoundMode === 'sudden_death' ? '⚡ SD' : '⏱️';
+        $('#puzzleTimer').text(`${modeLabel} ${seconds}s`);
+        if (remainingMs <= 0) stopPuzzleTimer();
+    };
+
+    render();
+    puzzleTimerInterval = setInterval(render, 250);
+}
+
 $(document).ready(function() {
     const savedRoom = normalizeRoomCode(sessionStorage.getItem('currentRoomCode'));
     if (savedRoom.length === 4) {
@@ -56,6 +82,9 @@ $(document).ready(function() {
     } else if (sessionStorage.getItem('currentRoomCode')) {
         sessionStorage.removeItem('currentRoomCode');
     }
+
+    $('#showRulesBtn').on('click', () => { $('#rulesModal').css('display', 'flex'); });
+    $('#closeRulesBtn').on('click', () => { $('#rulesModal').hide(); });
 
     $('#showLbBtn').on('click', () => {
         $('#leaderboardModal').css('display', 'flex');
@@ -131,6 +160,7 @@ $(document).ready(function() {
     });
 
     $('#exitSpectateBtn').on('click', () => {
+        stopPuzzleTimer();
         isSpectator = false;
         $('#gameArea').hide();
         $('#bracketArea').show();
@@ -150,6 +180,7 @@ socket.on('connect_error', () => {
 });
 
 socket.on('disconnect', () => {
+    stopPuzzleTimer();
     if ($('#lobby').is(':visible')) {
         $('#lobbyMsg').text('Mất kết nối máy chủ. Đang thử kết nối lại...');
     }
@@ -183,6 +214,7 @@ socket.on('updateLeaderboard', (data) => {
 });
 
 socket.on('errorMsg', (msg) => { 
+    stopPuzzleTimer();
     sessionStorage.removeItem('currentRoomCode');
     myRoomCode = null;
     $('#lobby').show();
@@ -210,12 +242,13 @@ function renderLeaderboard() {
     $('#lbTable tbody').html(html);
 }
 
-socket.on('roomDestroyed', () => { sessionStorage.removeItem('currentRoomCode'); window.location.reload(); });
+socket.on('roomDestroyed', () => { stopPuzzleTimer(); sessionStorage.removeItem('currentRoomCode'); window.location.reload(); });
 socket.on('updateWaitingRoom', (players) => {
     $('#playerList').empty(); players.forEach(p => { $('#playerList').append(`<li>👦 ${p.name}</li>`); });
 });
 
 socket.on('showBracket', (bracket) => {
+    stopPuzzleTimer();
     $('#lobby').hide(); $('#waitingRoom').hide(); $('#gameArea').hide(); $('#bracketArea').show();
     renderBracket(bracket);
     let count = 5; $('#bracketStatus').text(`Trận đấu bắt đầu sau ${count}s...`);
@@ -246,8 +279,10 @@ socket.on('gameStart', (data) => {
     $('#lobby').hide(); $('#waitingRoom').hide(); $('#bracketArea').hide(); $('#gameArea').show();
     $('#exitSpectateBtn').hide(); $('#emojiPanel').show(); 
     currentWinScore = data.winScore; currentPuzzleRound = data.puzzleRound; amIP1 = data.isP1; 
+    currentRoundMode = data.roundMode || 'regular';
     $('#displayWinScore').text(currentWinScore); $('.player').eq(0).text("👦 Bạn"); $('#opponentNameDisplay').text(data.opponentName + " 👧");
     $('#status').text("Đang tải dữ liệu cờ...");
+    startPuzzleTimer(data.deadlineAt, data.timeLimitMs);
     initBoard();
     $.getJSON(`puzzles_level${data.level}.json`, function(puzzles) {
         puzzleList = puzzles; isMyTurnToSolve = true;
@@ -260,8 +295,10 @@ socket.on('spectateStart', (data) => {
     $('#lobby').hide(); $('#waitingRoom').hide(); $('#bracketArea').hide(); $('#gameArea').show();
     $('#exitSpectateBtn').show(); $('#emojiPanel').hide(); 
     currentWinScore = data.winScore; currentPuzzleRound = data.puzzleRound; amIP1 = true; 
+    currentRoundMode = data.roundMode || 'regular';
     $('#displayWinScore').text(currentWinScore); $('.player').eq(0).text(data.p1Name + " (P1)"); $('#opponentNameDisplay').text(data.p2Name + " (P2)");
     $('#status').text("📺 Đang truyền hình trực tiếp...");
+    startPuzzleTimer(data.deadlineAt, data.timeLimitMs);
     initBoard();
     $.getJSON(`puzzles_level${data.level}.json`, function(puzzles) {
         puzzleList = puzzles; isMyTurnToSolve = false;
@@ -271,6 +308,7 @@ socket.on('spectateStart', (data) => {
 
 socket.on('spectateEnd', (data) => {
     if (isSpectator) {
+        stopPuzzleTimer();
         isSpectator = false; $('#gameArea').hide(); $('#bracketArea').show();
         renderBracket(data.bracket); alert(`Trận đấu kết thúc! Vị trí chiến thắng thuộc về: ${data.winner}`);
     }
@@ -278,14 +316,24 @@ socket.on('spectateEnd', (data) => {
 
 socket.on('byeMatch', () => { $('#bracketStatus').html("<strong style='color:green;'>Bạn được đặc cách vòng này! Đang chờ đối thủ khác thi đấu...</strong>"); });
 socket.on('update_game', (data) => {
+    if (data.roundMode) currentRoundMode = data.roundMode;
     currentPuzzleRound = data.puzzleRound; updateRopeUI(data.ropePosition);
+    startPuzzleTimer(data.deadlineAt, data.timeLimitMs);
     $('#status').text(isSpectator ? "📺 Thế trận vừa thay đổi!" : "Thế trận đã thay đổi!"); loadPuzzle(data.puzzleSeed);
+    if (data.message) {
+        $('#status').text(data.message);
+    }
 });
 socket.on('matchResult', (data) => {
+    stopPuzzleTimer();
     isMyTurnToSolve = false; $('#gameArea').hide(); $('#bracketArea').show(); $('#bracketStatus').text(`Đang chờ các nhánh khác...`);
     renderBracket(data.bracket);
+    if (data.reason) {
+        $('#bracketStatus').text(data.reason);
+    }
 });
 socket.on('tournamentOver', (data) => {
+    stopPuzzleTimer();
     sessionStorage.removeItem('currentRoomCode'); 
     $('#victoryText').html(`🏆 CHÚC MỪNG 🏆<br>${data.champion} ĐÃ VÔ ĐỊCH GIẢI ĐẤU!`); $('#victoryModal').css('display', 'flex');
 });
@@ -364,6 +412,11 @@ function handleSquareClick(square) {
         } else { 
             game.undo(); $('#status').text("Đi sai rồi. Tính lại đi!"); 
             board.position(game.fen()); 
+            if (!isSpectator && currentRoundMode === 'sudden_death') {
+                isMyTurnToSolve = false;
+                socket.emit('playerMistake', { roomCode: myRoomCode, token: myToken, puzzleRound: currentPuzzleRound });
+                $('#status').text("Bạn đi sai trong Sudden Death! Chờ kết quả...");
+            }
         }
     } else {
         if (piece && piece.color === turnColor) {
@@ -403,6 +456,11 @@ function onDrop(source, target) {
         }
     } else { 
         game.undo(); $('#status').text("Đi sai rồi. Tính lại đi!"); 
+        if (!isSpectator && currentRoundMode === 'sudden_death') {
+            isMyTurnToSolve = false;
+            socket.emit('playerMistake', { roomCode: myRoomCode, token: myToken, puzzleRound: currentPuzzleRound });
+            $('#status').text("Bạn đi sai trong Sudden Death! Chờ kết quả...");
+        }
         return 'snapback'; 
     }
 }
