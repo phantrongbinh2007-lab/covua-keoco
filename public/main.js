@@ -19,37 +19,73 @@ if (!myToken) {
     localStorage.setItem('chessTugToken', myToken);
 }
 
+function normalizeRoomCode(raw) {
+    return (raw || '').trim().replace(/\D/g, '');
+}
+
+function whenSocketReady(callback) {
+    if (socket.connected) {
+        callback();
+        return;
+    }
+    $('#lobbyMsg').text('Đang kết nối máy chủ...');
+    const onConnect = () => {
+        socket.off('connect_error', onError);
+        $('#lobbyMsg').text('');
+        callback();
+    };
+    const onError = () => {
+        socket.off('connect', onConnect);
+        $('#lobbyMsg').text('Không kết nối được máy chủ. Kiểm tra mạng rồi thử lại.');
+    };
+    socket.once('connect', onConnect);
+    socket.once('connect_error', onError);
+    if (!socket.active) socket.connect();
+}
+
 $(document).ready(function() {
-    // Kiểm tra xem trước đó có đang trong phòng nào không để Reconnect
-    let savedRoom = sessionStorage.getItem('currentRoomCode');
-    if (savedRoom) {
-        myRoomCode = savedRoom;
-        socket.emit('reconnectUser', { roomCode: savedRoom, token: myToken });
+    const savedRoom = normalizeRoomCode(sessionStorage.getItem('currentRoomCode'));
+    if (savedRoom.length === 4) {
+        whenSocketReady(() => {
+            myRoomCode = savedRoom;
+            socket.emit('reconnectUser', { roomCode: savedRoom, token: myToken });
+        });
+    } else if (sessionStorage.getItem('currentRoomCode')) {
+        sessionStorage.removeItem('currentRoomCode');
     }
 
     $('#createBtn').on('click', () => {
         const name = $('#playerName').val().trim();
         if (!name) return $('#lobbyMsg').text("Vui lòng nhập tên của bạn!");
-        
+
         const selectedLevel = $('#levelSelect').val();
         let winScore = parseInt($('#winScoreInput').val());
         if (isNaN(winScore) || winScore < 3) winScore = 3;
-        
-        // Gửi token kèm theo
-        socket.emit('createRoom', { playerName: name, level: selectedLevel, winScore: winScore, token: myToken });
+
+        whenSocketReady(() => {
+            sessionStorage.removeItem('currentRoomCode');
+            myRoomCode = null;
+            $('#lobbyMsg').text('Đang tạo giải đấu...');
+            socket.emit('createRoom', { playerName: name, level: selectedLevel, winScore: winScore, token: myToken });
+        });
     });
 
     $('#joinBtn').on('click', () => {
         const name = $('#playerName').val().trim();
         if (!name) return $('#lobbyMsg').text("Vui lòng nhập tên của bạn!");
-        
-        const code = $('#roomCode').val();
-        if (code.length === 4) {
-            socket.emit('joinRoom', { roomCode: code, playerName: name, token: myToken });
-            myRoomCode = code;
-        } else {
-            $('#lobbyMsg').text("Nhập đủ 4 số mã phòng!");
+
+        const code = normalizeRoomCode($('#roomCode').val());
+        if (code.length !== 4) {
+            return $('#lobbyMsg').text("Nhập đủ 4 chữ số mã phòng!");
         }
+        $('#roomCode').val(code);
+
+        whenSocketReady(() => {
+            sessionStorage.removeItem('currentRoomCode');
+            myRoomCode = null;
+            $('#lobbyMsg').text('Đang vào phòng...');
+            socket.emit('joinRoom', { roomCode: code, playerName: name, token: myToken });
+        });
     });
 
     $('#startTournamentBtn').on('click', () => {
@@ -73,9 +109,33 @@ $(document).ready(function() {
     });
 });
 
+socket.on('connect', () => {
+    if ($('#lobby').is(':visible') && !$('#lobbyMsg').text().includes('Đang')) {
+        $('#lobbyMsg').text('');
+    }
+});
+
+socket.on('connect_error', () => {
+    if ($('#lobby').is(':visible')) {
+        $('#lobbyMsg').text('Không kết nối được máy chủ. Kiểm tra mạng rồi thử lại.');
+    }
+});
+
+socket.on('disconnect', () => {
+    if ($('#lobby').is(':visible')) {
+        $('#lobbyMsg').text('Mất kết nối máy chủ. Đang thử kết nối lại...');
+    }
+});
+
+socket.on('reconnectFailed', () => {
+    sessionStorage.removeItem('currentRoomCode');
+    myRoomCode = null;
+});
+
 socket.on('roomCreated', (data) => { 
     myRoomCode = data.roomCode; 
-    sessionStorage.setItem('currentRoomCode', myRoomCode); // Lưu phòng vào phiên
+    sessionStorage.setItem('currentRoomCode', myRoomCode);
+    $('#lobbyMsg').text('');
     $('#lobby').hide();
     $('#bracketArea').hide();
     $('#gameArea').hide();
@@ -84,6 +144,9 @@ socket.on('roomCreated', (data) => {
     if (data.isHost) {
         $('#startTournamentBtn').show();
         $('#waitStatus').text("Bạn là chủ giải, hãy bấm Bắt đầu khi đủ người!");
+    } else {
+        $('#startTournamentBtn').hide();
+        $('#waitStatus').text("Đang chờ chủ phòng bắt đầu...");
     }
 });
 
@@ -95,8 +158,14 @@ socket.on('updateWaitingRoom', (players) => {
 });
 
 socket.on('errorMsg', (msg) => { 
-    $('#lobbyMsg').text(msg); 
-    sessionStorage.removeItem('currentRoomCode'); 
+    sessionStorage.removeItem('currentRoomCode');
+    myRoomCode = null;
+    $('#lobby').show();
+    $('#waitingRoom').hide();
+    $('#bracketArea').hide();
+    $('#gameArea').hide();
+    $('#startTournamentBtn').hide();
+    $('#lobbyMsg').text(msg);
 });
 
 socket.on('showBracket', (bracket) => {

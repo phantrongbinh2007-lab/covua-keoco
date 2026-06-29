@@ -10,6 +10,11 @@ app.use(express.static('public'));
 
 const rooms = {};
 
+function normalizeRoomCode(code) {
+    if (code == null) return '';
+    return String(code).trim().replace(/\D/g, '');
+}
+
 function generateNextRound(room) {
     let players = room.activePlayers;
     let matches = [];
@@ -53,21 +58,30 @@ io.on('connection', (socket) => {
 
     // XỬ LÝ RECONNECT
     socket.on('reconnectUser', (data) => {
-        const room = rooms[data.roomCode];
-        if (!room) return; // Phòng đã giải tán hoặc không tồn tại
+        const roomCode = normalizeRoomCode(data.roomCode);
+        if (!/^\d{4}$/.test(roomCode)) {
+            socket.emit('reconnectFailed');
+            return;
+        }
 
-        // Tìm người chơi dựa trên Token (Căn cước ngầm)
+        const room = rooms[roomCode];
+        if (!room) {
+            socket.emit('reconnectFailed');
+            return;
+        }
+
         const player = room.players.find(p => p.token === data.token);
-        if (!player) return;
+        if (!player) {
+            socket.emit('reconnectFailed');
+            return;
+        }
 
-        // Cập nhật socket.id mới cho người chơi này
         player.id = socket.id;
-        socket.join(data.roomCode);
-        console.log(`🔄 Kỳ thủ [${player.name}] vừa Reconnect thành công vào phòng [${data.roomCode}]`);
+        socket.join(roomCode);
+        console.log(`🔄 Kỳ thủ [${player.name}] vừa Reconnect thành công vào phòng [${roomCode}]`);
 
-        // Đưa người chơi về đúng màn hình họ đang đứng
         if (room.status === 'waiting') {
-            socket.emit('roomCreated', { roomCode: data.roomCode, isHost: room.hostToken === data.token });
+            socket.emit('roomCreated', { roomCode, isHost: room.hostToken === data.token });
             socket.emit('updateWaitingRoom', room.players);
         } else if (room.status === 'playing') {
             let match = room.currentRoundMatches.find(m => m.p1?.token === data.token || m.p2?.token === data.token);
@@ -89,12 +103,18 @@ io.on('connection', (socket) => {
     });
 
     socket.on('createRoom', (settings) => {
+        const playerName = (settings.playerName || '').trim();
+        if (!playerName) {
+            socket.emit('errorMsg', 'Vui lòng nhập tên của bạn!');
+            return;
+        }
+
         const roomCode = Math.floor(1000 + Math.random() * 9000).toString();
         const winScore = parseInt(settings.winScore) || 3;
 
         rooms[roomCode] = {
             hostToken: settings.token,
-            players: [{ id: socket.id, token: settings.token, name: settings.playerName }],
+            players: [{ id: socket.id, token: settings.token, name: playerName }],
             activePlayers: [], 
             bracket: [], 
             currentRoundMatches: [],
@@ -105,30 +125,45 @@ io.on('connection', (socket) => {
         socket.join(roomCode);
         socket.emit('roomCreated', { roomCode, isHost: true });
         io.to(roomCode).emit('updateWaitingRoom', rooms[roomCode].players);
-        console.log(`🏠 Giải đấu [${roomCode}] được tạo bởi ${settings.playerName}.`);
+        console.log(`🏠 Giải đấu [${roomCode}] được tạo bởi ${playerName}.`);
     });
 
     socket.on('joinRoom', (data) => {
-        const room = rooms[data.roomCode];
+        const roomCode = normalizeRoomCode(data.roomCode);
+        const playerName = (data.playerName || '').trim();
+
+        if (!/^\d{4}$/.test(roomCode)) {
+            socket.emit('errorMsg', 'Mã phòng phải có đúng 4 chữ số!');
+            return;
+        }
+        if (!playerName) {
+            socket.emit('errorMsg', 'Vui lòng nhập tên của bạn!');
+            return;
+        }
+
+        const room = rooms[roomCode];
         if (room && room.status === 'waiting') {
-            // Chống spam: Nếu token này đã có trong phòng thì không add thêm
             const existingPlayer = room.players.find(p => p.token === data.token);
             if (existingPlayer) {
-                existingPlayer.id = socket.id; // Cập nhật ID mới
-                existingPlayer.name = data.playerName;
+                existingPlayer.id = socket.id;
+                existingPlayer.name = playerName;
             } else {
-                room.players.push({ id: socket.id, token: data.token, name: data.playerName });
+                room.players.push({ id: socket.id, token: data.token, name: playerName });
             }
-            
-            socket.join(data.roomCode);
-            socket.emit('roomCreated', { roomCode: data.roomCode, isHost: false });
-            io.to(data.roomCode).emit('updateWaitingRoom', room.players);
+
+            socket.join(roomCode);
+            socket.emit('roomCreated', { roomCode, isHost: false });
+            io.to(roomCode).emit('updateWaitingRoom', room.players);
+            console.log(`✅ [${playerName}] vào phòng [${roomCode}] (${room.players.length} người)`);
         } else {
+            const reason = room ? 'đã bắt đầu' : 'không tồn tại';
+            console.log(`❌ [${playerName}] không vào được phòng [${roomCode}] — ${reason}`);
             socket.emit('errorMsg', 'Mã phòng không tồn tại hoặc giải đấu đã bắt đầu!');
         }
     });
 
     socket.on('startTournament', (roomCode) => {
+        roomCode = normalizeRoomCode(roomCode);
         const room = rooms[roomCode];
         // Chỉ Host (kiểm tra qua token) mới được bấm bắt đầu
         const player = room.players.find(p => p.id === socket.id);
