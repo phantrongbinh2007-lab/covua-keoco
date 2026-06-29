@@ -17,12 +17,18 @@ button:hover { background: #c0392b; transform: scale(1.05); }
 
 #roomCode { padding: 12px; font-size: 16px; width: 150px; text-align: center; margin-right: 10px; }
 #lobbyMsg { color: #e74c3c; font-weight: bold; margin-top: 15px; }
-#playerList { list-style: none; padding: 0; font-size: 18px; font-weight: bold; color: #2980b9; }
+#playerList { list-style: none; padding: 0; font-size: 18px; font-weight: bold; color: #2980b9; max-height: 280px; overflow-y: auto; }
 #playerList li { padding: 5px 0; border-bottom: 1px dashed #ccc; }
-
-#bracketContent { display: flex; gap: 20px; justify-content: center; overflow-x: auto; padding: 20px 0; align-items: stretch; }
-.bracket-round { display: flex; flex-direction: column; gap: 20px; justify-content: space-around; }
-.bracket-round h3 { margin: 0 0 10px 0; color: #8e44ad; }
+#bracketContent { max-height: 70vh; overflow-y: auto; padding: 10px 0; text-align: left; }
+.bracket-round { margin-bottom: 12px; }
+.bracket-round-active { border: 2px solid #e74c3c; border-radius: 10px; padding: 14px; background: #fff8f8; }
+.bracket-round-collapsed { border: 1px solid #ddd; border-radius: 8px; padding: 10px 14px; background: #f8f9fa; }
+.bracket-round-collapsed .round-details { margin-top: 10px; }
+.bracket-toggle { cursor: pointer; user-select: none; margin: 0 !important; }
+.bracket-toggle:hover { color: #e74c3c; }
+.round-summary { font-size: 13px; color: #7f8c8d; font-weight: normal; }
+.bracket-matches-grid { display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; }
+.bracket-round h3 { margin: 0 0 10px 0; color: #8e44ad; text-align: center; }
 .match-box, .match-bye { border: 2px solid #bdc3c7; padding: 10px; border-radius: 8px; background: white; width: 160px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); position: relative;}
 .match-bye { border-style: dashed; opacity: 0.8; background: #f9f9f9; }
 .match-player { font-weight: bold; padding: 5px; border-bottom: 1px solid #ecf0f1; }
@@ -54,7 +60,19 @@ button:hover { background: #c0392b; transform: scale(1.05); }
 .floating-emoji { position: absolute; font-size: 50px; pointer-events: none; z-index: 100; animation: floatUp 1.5s ease-out forwards; text-shadow: 0 4px 8px rgba(0,0,0,0.3); }
 @keyframes floatUp { 0% { opacity: 0; transform: translateY(0) scale(0.5); } 20% { opacity: 1; transform: translateY(-20px) scale(1.2); } 80% { opacity: 1; transform: translateY(-60px) scale(1); } 100% { opacity: 0; transform: translateY(-80px) scale(0.8); } }
 
-#victoryModal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.9); z-index: 9999; flex-direction: column; justify-content: center; align-items: center; }
+#victoryModal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.9); z-index: 9999; flex-direction: column; justify-content: center; align-items: center; padding: 20px; box-sizing: border-box; }
+#resultsPanel { background: rgba(255,255,255,0.1); border-radius: 10px; padding: 15px; margin: 15px 0; max-width: 400px; width: 100%; color: #fff; }
+.results-table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+.results-table th, .results-table td { padding: 8px; border-bottom: 1px solid rgba(255,255,255,0.2); text-align: left; }
+.results-actions { display: flex; gap: 10px; margin-bottom: 15px; flex-wrap: wrap; justify-content: center; }
+.results-actions button { background: #3498db; font-size: 14px; padding: 10px 16px; }
+.results-actions button:hover { background: #2980b9; }
+
+#countdownOverlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); z-index: 10000; justify-content: center; align-items: center; }
+.countdown-box { text-align: center; color: #fff; }
+.countdown-box p { font-size: 22px; margin-bottom: 20px; }
+#countdownNumber { font-size: 120px; font-weight: bold; color: #e74c3c; text-shadow: 0 0 30px rgba(231,76,60,0.6); animation: pulse-count 1s infinite; }
+@keyframes pulse-count { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.08); } }
 #victoryText { font-size: 4rem; color: #f1c40f; text-shadow: 0 0 20px #e67e22, 0 0 40px #e67e22; margin-bottom: 40px; text-transform: uppercase; text-align: center; }
 
 .ad-banner-side { position: fixed; top: 50%; transform: translateY(-50%); width: 160px; height: 600px; background-color: #34495e; color: #95a5a6; border: 2px dashed #7f8c8d; border-radius: 10px; display: flex; align-items: center; justify-content: center; text-transform: uppercase; font-weight: bold; z-index: 0; }

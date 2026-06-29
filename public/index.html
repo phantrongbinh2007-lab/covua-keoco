@@ -44,13 +44,28 @@
         </div>
     </div>
 
-    <div id="victoryModal"><h1 id="victoryText">🏆 VÔ ĐỊCH TOÀN CÕI 🏆</h1><button id="backToLobbyBtn">Trở về sảnh chính</button></div>
+    <div id="countdownOverlay" style="display: none;">
+        <div class="countdown-box">
+            <p id="countdownLabel">Giải sắp bắt đầu!</p>
+            <div id="countdownNumber">10</div>
+        </div>
+    </div>
+
+    <div id="victoryModal">
+        <h1 id="victoryText">🏆 VÔ ĐỊCH TOÀN CÕI 🏆</h1>
+        <div id="resultsPanel"></div>
+        <div class="results-actions">
+            <button id="copyResultsBtn">📋 Copy kết quả</button>
+            <button id="downloadResultsBtn">💾 Tải file .txt</button>
+        </div>
+        <button id="backToLobbyBtn">Trở về sảnh chính</button>
+    </div>
     <div class="ad-banner-side" id="ad-left">[ Banner Trái 160x600 ]</div>
     <div class="ad-banner-side" id="ad-right">[ Banner Phải 160x600 ]</div>
 
     <div id="app">
         <div id="lobby">
-            <h2>🔥 Cờ Vua Kéo Co - Tournament 🔥</h2>
+            <h2>🔥 Cờ Vua Kéo Co - Tournament (tối đa 64 người) 🔥</h2>
             <button id="showRulesBtn" class="rules-btn">📜 Xem Luật Trận Đấu</button>
             <button id="showLbBtn" class="pulse-btn">🏆 Xem Bảng Xếp Hạng 🏆</button>
 
@@ -70,14 +85,15 @@
             </div>
             <button id="createBtn">Tạo Giải Đấu Mới</button>
             <hr style="margin: 25px 0;">
-            <input type="text" id="roomCode" placeholder="Mã phòng..." maxlength="4">
+            <input type="text" id="roomCode" placeholder="Mã phòng..." maxlength="4" inputmode="numeric" pattern="[0-9]*">
             <button id="joinBtn">Vào Giải</button>
             <p id="lobbyMsg"></p>
         </div>
 
         <div id="waitingRoom" style="display: none;">
             <h2>Mã Giải Đấu: <strong id="waitRoomCode" style="color:#d9534f; font-size: 30px;"></strong></h2>
-            <p>Chia sẻ mã này cho bạn bè để rủ họ vào giải!</p>
+            <p id="waitPlayerCount" style="font-size: 18px; color: #27ae60; font-weight: bold; margin: 8px 0;">0/64 người</p>
+            <p>Chia sẻ mã này cho học viên vào giải (tối đa 64 người)!</p>
             <div class="settings-box"><label>Tuyển thủ tham gia:</label><ul id="playerList"></ul></div>
             <button id="startTournamentBtn" style="display: none; margin-bottom: 10px;">Bắt Đầu Bốc Thăm & Đấu</button>
             <button id="leaveRoomBtn" style="background: #7f8c8d; display: block; margin: 0 auto;">⬅ Hủy & Rời Phòng</button>

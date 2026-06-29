@@ -1,0 +1,16 @@
+{
+  "rules": {
+    "leaderboard": {
+      ".read": true,
+      ".write": false
+    },
+    "rooms": {
+      ".read": true,
+      ".write": false
+    },
+    "tournamentResults": {
+      ".read": true,
+      ".write": false
+    }
+  }
+}

@@ -1,4 +1,10 @@
-const socket = io(); 
+const socket = io({
+    transports: ['polling', 'websocket'],
+    reconnection: true,
+    reconnectionAttempts: 15,
+    reconnectionDelay: 1000,
+    timeout: 20000
+});
 let game = new Chess();
 let board = null;
 let myRoomCode = null;
@@ -18,6 +24,8 @@ let puzzleTimerInterval = null;
 
 let globalLeaderboard = { daily: {}, weekly: {}, monthly: {} };
 let currentLbTab = 'daily';
+let puzzleCacheByLevel = {};
+let lastTournamentResults = null;
 
 let myToken = localStorage.getItem('chessTugToken');
 if (!myToken) {
@@ -27,6 +35,145 @@ if (!myToken) {
 
 function normalizeRoomCode(raw) {
     return (raw || '').trim().replace(/\D/g, '');
+}
+
+function escapeHtml(text) {
+    return $('<span>').text(text || '').html();
+}
+
+let pendingJoin = null;
+let joinTimeoutId = null;
+let pendingCreate = null;
+let createTimeoutId = null;
+const MAX_PLAYERS = 64;
+
+function clearPendingJoin() {
+    pendingJoin = null;
+    if (joinTimeoutId) {
+        clearTimeout(joinTimeoutId);
+        joinTimeoutId = null;
+    }
+}
+
+function attemptJoinRoom(code, name) {
+    clearPendingJoin();
+    pendingJoin = { code, name, retries: 0 };
+    doJoinRoom();
+}
+
+function doJoinRoom() {
+    if (!pendingJoin || myRoomCode) return;
+
+    const { code, name, retries } = pendingJoin;
+    $('#lobbyMsg').text(retries > 0 ? `Đang vào phòng (thử lại lần ${retries})...` : 'Đang vào phòng...');
+
+    if (joinTimeoutId) clearTimeout(joinTimeoutId);
+    joinTimeoutId = setTimeout(() => {
+        if (myRoomCode || !pendingJoin) return;
+        if (pendingJoin.retries < 3) {
+            pendingJoin.retries++;
+            if (socket.connected) {
+                doJoinRoom();
+            } else {
+                whenSocketReady(doJoinRoom);
+            }
+        } else {
+            clearPendingJoin();
+            $('#lobbyMsg').text('Không nhận được phản hồi từ máy chủ. Kiểm tra mạng rồi bấm Vào Giải lại.');
+        }
+    }, 8000);
+
+    socket.emit('joinRoom', { roomCode: code, playerName: name, token: myToken }, (res) => {
+        if (joinTimeoutId) {
+            clearTimeout(joinTimeoutId);
+            joinTimeoutId = null;
+        }
+        if (res && res.ok) {
+            clearPendingJoin();
+        } else if (res && !res.ok) {
+            clearPendingJoin();
+            if ($('#lobby').is(':visible')) {
+                $('#lobbyMsg').text(res.error || 'Không vào được phòng.');
+            }
+        }
+    });
+}
+
+function clearPendingCreate() {
+    pendingCreate = null;
+    if (createTimeoutId) {
+        clearTimeout(createTimeoutId);
+        createTimeoutId = null;
+    }
+}
+
+function attemptCreateRoom(settings) {
+    clearPendingCreate();
+    pendingCreate = { settings, retries: 0 };
+    doCreateRoom();
+}
+
+function doCreateRoom() {
+    if (!pendingCreate || myRoomCode) return;
+
+    const { settings, retries } = pendingCreate;
+    $('#lobbyMsg').text(retries > 0 ? `Đang tạo giải đấu (thử lại lần ${retries})...` : 'Đang tạo giải đấu...');
+
+    if (createTimeoutId) clearTimeout(createTimeoutId);
+    createTimeoutId = setTimeout(() => {
+        if (myRoomCode || !pendingCreate) return;
+        if (pendingCreate.retries < 3) {
+            pendingCreate.retries++;
+            if (socket.connected) {
+                doCreateRoom();
+            } else {
+                whenSocketReady(doCreateRoom);
+            }
+        } else {
+            clearPendingCreate();
+            $('#lobbyMsg').text('Không nhận được phản hồi từ máy chủ. Kiểm tra mạng rồi thử tạo lại.');
+        }
+    }, 8000);
+
+    socket.emit('createRoom', settings, (res) => {
+        if (createTimeoutId) {
+            clearTimeout(createTimeoutId);
+            createTimeoutId = null;
+        }
+        if (res && res.ok) {
+            clearPendingCreate();
+        } else if (res && !res.ok) {
+            clearPendingCreate();
+            if ($('#lobby').is(':visible')) {
+                $('#lobbyMsg').text(res.error || 'Không tạo được giải đấu.');
+            }
+        }
+    });
+}
+
+function renderWaitingRoom(data) {
+    const players = Array.isArray(data) ? data : (data.players || []);
+    const maxPlayers = data.maxPlayers || MAX_PLAYERS;
+    $('#waitPlayerCount').text(`${players.length}/${maxPlayers} người`);
+    $('#playerList').empty();
+    players.forEach(p => {
+        $('#playerList').append(`<li>👦 ${escapeHtml(p.name)}</li>`);
+    });
+
+    const isHost = $('#startTournamentBtn').is(':visible');
+    if (isHost) {
+        const canStart = players.length >= 2;
+        $('#startTournamentBtn').prop('disabled', !canStart);
+        if (!canStart) {
+            $('#waitStatus').text('Cần ít nhất 2 người để bắt đầu giải.');
+        } else if (players.length >= maxPlayers) {
+            $('#waitStatus').text('Đủ người! Bạn có thể bắt đầu giải đấu.');
+        } else {
+            $('#waitStatus').text(`Đã có ${players.length} người — tối đa ${maxPlayers}. Bấm Bắt đầu khi sẵn sàng!`);
+        }
+    } else if (players.length >= maxPlayers) {
+        $('#waitStatus').text('Phòng đã đủ người! Đang chờ chủ phòng bắt đầu...');
+    }
 }
 
 function whenSocketReady(callback) {
@@ -72,11 +219,45 @@ function startPuzzleTimer(deadlineAt, timeLimitMs) {
     puzzleTimerInterval = setInterval(render, 250);
 }
 
+function loadPuzzlesForLevel(level, callback) {
+    if (puzzleCacheByLevel[level]) {
+        callback(puzzleCacheByLevel[level]);
+        return;
+    }
+    $.getJSON(`/api/puzzles/${level}`, function(puzzles) {
+        puzzleCacheByLevel[level] = puzzles;
+        callback(puzzles);
+    }).fail(() => {
+        $('#status').text('Không tải được bài tập. Thử tải lại trang.');
+    });
+}
+
+function showCountdownOverlay(label, seconds) {
+    $('#countdownLabel').text(label);
+    if (seconds > 0) {
+        $('#countdownNumber').text(seconds);
+        $('#countdownOverlay').css('display', 'flex');
+    } else {
+        $('#countdownNumber').text('GO!');
+        setTimeout(() => $('#countdownOverlay').hide(), 600);
+    }
+}
+
+function renderTournamentResults(data) {
+    lastTournamentResults = data;
+    let html = `<p><strong>Mã giải:</strong> ${escapeHtml(data.roomCode || '')} | <strong>${data.totalPlayers || 0} kỳ thủ</strong></p>`;
+    html += '<table class="results-table"><thead><tr><th>Hạng</th><th>Kỳ thủ</th></tr></thead><tbody>';
+    (data.top8 || []).forEach(p => {
+        html += `<tr><td>${p.medal}</td><td>${escapeHtml(p.name)}</td></tr>`;
+    });
+    html += '</tbody></table>';
+    $('#resultsPanel').html(html);
+}
+
 $(document).ready(function() {
     const savedRoom = normalizeRoomCode(sessionStorage.getItem('currentRoomCode'));
     if (savedRoom.length === 4) {
         whenSocketReady(() => {
-            myRoomCode = savedRoom;
             socket.emit('reconnectUser', { roomCode: savedRoom, token: myToken });
         });
     } else if (sessionStorage.getItem('currentRoomCode')) {
@@ -109,8 +290,7 @@ $(document).ready(function() {
         whenSocketReady(() => {
             sessionStorage.removeItem('currentRoomCode');
             myRoomCode = null;
-            $('#lobbyMsg').text('Đang tạo giải đấu...');
-            socket.emit('createRoom', { playerName: name, level: selectedLevel, winScore: winScore, token: myToken });
+            attemptCreateRoom({ playerName: name, level: selectedLevel, winScore: winScore, token: myToken });
         });
     });
 
@@ -127,8 +307,7 @@ $(document).ready(function() {
         whenSocketReady(() => {
             sessionStorage.removeItem('currentRoomCode');
             myRoomCode = null;
-            $('#lobbyMsg').text('Đang vào phòng...');
-            socket.emit('joinRoom', { roomCode: code, playerName: name, token: myToken });
+            attemptJoinRoom(code, name);
         });
     });
 
@@ -138,8 +317,28 @@ $(document).ready(function() {
         window.location.reload();
     });
 
-    $('#startTournamentBtn').on('click', () => { socket.emit('startTournament', myRoomCode); });
+    $('#startTournamentBtn').on('click', () => {
+        socket.emit('startTournament', { roomCode: myRoomCode, token: myToken });
+    });
     $('#backToLobbyBtn').on('click', () => { sessionStorage.removeItem('currentRoomCode'); window.location.reload(); });
+
+    $('#copyResultsBtn').on('click', () => {
+        if (!lastTournamentResults?.exportText) return;
+        navigator.clipboard.writeText(lastTournamentResults.exportText).then(() => {
+            $('#copyResultsBtn').text('✅ Đã copy!');
+            setTimeout(() => $('#copyResultsBtn').text('📋 Copy kết quả'), 2000);
+        });
+    });
+
+    $('#downloadResultsBtn').on('click', () => {
+        if (!lastTournamentResults?.exportText) return;
+        const blob = new Blob([lastTournamentResults.exportText], { type: 'text/plain;charset=utf-8' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `ket-qua-giai-${lastTournamentResults.roomCode || 'keoco'}.txt`;
+        a.click();
+        URL.revokeObjectURL(a.href);
+    });
     
     $('#board').on('click', '.square-55d63', function() {
         if (isSpectator) return; 
@@ -159,6 +358,15 @@ $(document).ready(function() {
         socket.emit('watchMatch', { roomCode: myRoomCode, matchId: matchId });
     });
 
+    $('#bracketContent').on('click', '.bracket-toggle', function() {
+        const $round = $(this).closest('.bracket-round-collapsed');
+        const $details = $round.find('.round-details');
+        const $icon = $(this).find('.toggle-icon');
+        $details.slideToggle(200, function() {
+            $icon.text($details.is(':visible') ? '▼' : '▶');
+        });
+    });
+
     $('#exitSpectateBtn').on('click', () => {
         stopPuzzleTimer();
         isSpectator = false;
@@ -168,6 +376,18 @@ $(document).ready(function() {
 });
 
 socket.on('connect', () => {
+    if (pendingJoin && !myRoomCode) {
+        doJoinRoom();
+        return;
+    }
+    if (pendingCreate && !myRoomCode) {
+        doCreateRoom();
+        return;
+    }
+    if (myRoomCode) {
+        socket.emit('reconnectUser', { roomCode: myRoomCode, token: myToken });
+        return;
+    }
     if ($('#lobby').is(':visible') && !$('#lobbyMsg').text().includes('Đang')) {
         $('#lobbyMsg').text('');
     }
@@ -189,10 +409,15 @@ socket.on('disconnect', () => {
 socket.on('reconnectFailed', () => {
     sessionStorage.removeItem('currentRoomCode');
     myRoomCode = null;
+    if ($('#lobby').is(':visible')) {
+        $('#lobbyMsg').text('Phiên phòng cũ đã hết hạn. Nhập mã phòng mới để vào giải.');
+    }
 });
 
-socket.on('roomCreated', (data) => { 
-    myRoomCode = data.roomCode; 
+socket.on('roomCreated', (data) => {
+    clearPendingJoin();
+    clearPendingCreate();
+    myRoomCode = data.roomCode;
     sessionStorage.setItem('currentRoomCode', myRoomCode);
     $('#lobbyMsg').text('');
     $('#lobby').hide();
@@ -200,20 +425,24 @@ socket.on('roomCreated', (data) => {
     $('#gameArea').hide();
     $('#waitingRoom').show();
     $('#waitRoomCode').text(data.roomCode);
+    $('#startTournamentBtn').prop('disabled', true);
     if (data.isHost) {
-        $('#startTournamentBtn').show();
-        $('#waitStatus').text("Bạn là chủ giải, hãy bấm Bắt đầu khi đủ người!");
+        $('#startTournamentBtn').show().text('Bắt Đầu Bốc Thăm & Đấu');
+        $('#waitStatus').text('Bạn là chủ giải — chia sẻ mã phòng cho tối đa 64 người!');
     } else {
         $('#startTournamentBtn').hide();
-        $('#waitStatus').text("Đang chờ chủ phòng bắt đầu...");
+        $('#waitStatus').text('Đang chờ chủ phòng bắt đầu...');
     }
+    $('#waitPlayerCount').text(`${data.playerCount || 1}/${data.maxPlayers || MAX_PLAYERS} người`);
 });
 socket.on('updateLeaderboard', (data) => {
     globalLeaderboard = data || { daily: {}, weekly: {}, monthly: {} };
     if ($('#leaderboardModal').is(':visible')) renderLeaderboard();
 });
 
-socket.on('errorMsg', (msg) => { 
+socket.on('errorMsg', (msg) => {
+    clearPendingJoin();
+    clearPendingCreate();
     stopPuzzleTimer();
     sessionStorage.removeItem('currentRoomCode');
     myRoomCode = null;
@@ -243,35 +472,87 @@ function renderLeaderboard() {
 }
 
 socket.on('roomDestroyed', () => { stopPuzzleTimer(); sessionStorage.removeItem('currentRoomCode'); window.location.reload(); });
-socket.on('updateWaitingRoom', (players) => {
-    $('#playerList').empty(); players.forEach(p => { $('#playerList').append(`<li>👦 ${p.name}</li>`); });
+socket.on('updateWaitingRoom', (data) => { renderWaitingRoom(data); });
+socket.on('hostChanged', (data) => {
+    $('#waitStatus').text(data.message || 'Chủ giải đã thay đổi.');
+    if (data.hostToken === myToken) {
+        $('#startTournamentBtn').show().text('Bắt Đầu Bốc Thăm & Đấu');
+    } else {
+        $('#startTournamentBtn').hide();
+    }
+});
+socket.on('waitNotice', (msg) => { $('#waitStatus').text(msg); });
+
+socket.on('tournamentCountdown', (data) => {
+    $('#startTournamentBtn').prop('disabled', true);
+    if (data.seconds > 0) {
+        $('#waitStatus').text(`Giải bắt đầu sau ${data.seconds} giây...`);
+        showCountdownOverlay('🔥 Giải sắp bắt đầu!', data.seconds);
+    } else {
+        $('#waitingRoom').hide();
+        $('#countdownOverlay').hide();
+    }
+});
+
+socket.on('roundCountdown', (data) => {
+    if (data.seconds > 0) {
+        $('#bracketStatus').text(`Trận đấu bắt đầu sau ${data.seconds}s...`);
+    } else {
+        $('#bracketStatus').text('⚔️ Bắt đầu!');
+    }
 });
 
 socket.on('showBracket', (bracket) => {
     stopPuzzleTimer();
-    $('#lobby').hide(); $('#waitingRoom').hide(); $('#gameArea').hide(); $('#bracketArea').show();
+    $('#lobby').hide(); $('#waitingRoom').hide(); $('#gameArea').hide(); $('#countdownOverlay').hide();
+    $('#bracketArea').show();
     renderBracket(bracket);
-    let count = 5; $('#bracketStatus').text(`Trận đấu bắt đầu sau ${count}s...`);
-    let iv = setInterval(() => { count--; $('#bracketStatus').text(`Trận đấu bắt đầu sau ${count}s...`); if (count <= 0) clearInterval(iv); }, 1000);
+    $('#bracketStatus').text('Chuẩn bị vào trận đấu...');
 });
-socket.on('updateBracketOnly', (bracket) => { renderBracket(bracket); });
+socket.on('updateBracketOnly', (data) => { renderBracket(data); });
 
-function renderBracket(bracket) {
+function renderMatchHtml(m) {
+    let p1Name = escapeHtml(m.p1 ? m.p1.name : '---');
+    let p2Name = escapeHtml(m.p2 ? m.p2.name : '---');
+    let winnerText = m.winner ? `<span class="winner-text">🏆 ${escapeHtml(m.winner.name)}</span>` : '';
+    if (m.isBye) {
+        return `<div class="match-bye"><div class="match-player">${p1Name}</div><div class="match-vs">(Đặc cách)</div>${winnerText}</div>`;
+    }
+    let watchBtnHtml = (!m.winner && !m.isBye) ? `<button class="watch-btn" data-match="${m.id}">👀 Xem</button>` : '';
+    return `<div class="match-box"><div class="match-player">${p1Name}</div><div class="match-vs">VS</div><div class="match-player">${p2Name}</div>${winnerText}${watchBtnHtml}</div>`;
+}
+
+function renderBracket(data) {
+    const rounds = Array.isArray(data) ? data : (data.bracket || []);
+    const currentRoundIndex = Array.isArray(data) ? rounds.length - 1 : (data.currentRoundIndex ?? rounds.length - 1);
     let html = '';
-    bracket.forEach((round, rIdx) => {
-        html += `<div class="bracket-round"><h3>Vòng ${rIdx + 1}</h3>`;
-        round.forEach(m => {
-            let p1Name = m.p1 ? m.p1.name : '---'; let p2Name = m.p2 ? m.p2.name : '---';
-            let winnerText = m.winner ? `<span class="winner-text">🏆 Thắng: ${m.winner.name}</span>` : '';
-            if (m.isBye) { html += `<div class="match-bye"><div class="match-player">${p1Name}</div><div class="match-vs">(Đặc cách vòng này)</div>${winnerText}</div>`; } 
-            else {
-                let watchBtnHtml = (!m.winner && !m.isBye) ? `<button class="watch-btn" data-match="${m.id}">👀 Xem</button>` : '';
-                html += `<div class="match-box"><div class="match-player">${p1Name}</div><div class="match-vs">VS</div><div class="match-player">${p2Name}</div>${winnerText}${watchBtnHtml}</div>`;
-            }
-        });
-        html += `</div>`;
+
+    rounds.forEach((round, rIdx) => {
+        const isPast = rIdx < currentRoundIndex;
+        const isCurrent = rIdx === currentRoundIndex;
+        const doneCount = round.filter(m => m.winner).length;
+        const totalCount = round.length;
+
+        if (isPast) {
+            html += `<div class="bracket-round bracket-round-collapsed">`;
+            html += `<h3 class="bracket-toggle"><span class="toggle-icon">▶</span> Vòng ${rIdx + 1} <span class="round-summary">(${doneCount}/${totalCount} trận xong — nhấn để xem)</span></h3>`;
+            html += `<div class="round-details" style="display:none"><div class="bracket-matches-grid">`;
+            round.forEach(m => { html += renderMatchHtml(m); });
+            html += `</div></div></div>`;
+        } else if (isCurrent) {
+            html += `<div class="bracket-round bracket-round-active">`;
+            html += `<h3>🔴 Vòng ${rIdx + 1} — ĐANG ĐẤU <span class="round-summary">(${doneCount}/${totalCount} trận xong)</span></h3>`;
+            html += `<div class="bracket-matches-grid">`;
+            round.forEach(m => { html += renderMatchHtml(m); });
+            html += `</div></div>`;
+        }
     });
+
     $('#bracketContent').html(html);
+    const $active = $('.bracket-round-active');
+    if ($active.length) {
+        $('#bracketContent').scrollTop($active.position().top + $('#bracketContent').scrollTop() - 20);
+    }
 }
 
 socket.on('gameStart', (data) => {
@@ -284,7 +565,7 @@ socket.on('gameStart', (data) => {
     $('#status').text("Đang tải dữ liệu cờ...");
     startPuzzleTimer(data.deadlineAt, data.timeLimitMs);
     initBoard();
-    $.getJSON(`puzzles_level${data.level}.json`, function(puzzles) {
+    loadPuzzlesForLevel(data.level, function(puzzles) {
         puzzleList = puzzles; isMyTurnToSolve = true;
         updateRopeUI(data.ropePosition); loadPuzzle(data.puzzleSeed);
     });
@@ -300,7 +581,7 @@ socket.on('spectateStart', (data) => {
     $('#status').text("📺 Đang truyền hình trực tiếp...");
     startPuzzleTimer(data.deadlineAt, data.timeLimitMs);
     initBoard();
-    $.getJSON(`puzzles_level${data.level}.json`, function(puzzles) {
+    loadPuzzlesForLevel(data.level, function(puzzles) {
         puzzleList = puzzles; isMyTurnToSolve = false;
         updateRopeUI(data.ropePosition); loadPuzzle(data.puzzleSeed);
     });
@@ -334,8 +615,12 @@ socket.on('matchResult', (data) => {
 });
 socket.on('tournamentOver', (data) => {
     stopPuzzleTimer();
-    sessionStorage.removeItem('currentRoomCode'); 
-    $('#victoryText').html(`🏆 CHÚC MỪNG 🏆<br>${data.champion} ĐÃ VÔ ĐỊCH GIẢI ĐẤU!`); $('#victoryModal').css('display', 'flex');
+    sessionStorage.removeItem('currentRoomCode');
+    const champion = data.champion || data;
+    const name = typeof champion === 'string' ? champion : champion.name;
+    $('#victoryText').html(`🏆 CHÚC MỪNG 🏆<br>${escapeHtml(name)} ĐÃ VÔ ĐỊCH!`);
+    if (data.top8) renderTournamentResults(data);
+    $('#victoryModal').css('display', 'flex');
 });
 socket.on('receiveEmoji', (emoji) => { showFloatingEmoji(emoji, 'opponent'); });
 
