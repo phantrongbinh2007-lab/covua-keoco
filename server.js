@@ -143,7 +143,7 @@ io.on('connection', (socket) => {
     });
 
     socket.on('leaveRoom', (data) => {
-        const rCode = String(data.roomCode).trim();
+        const rCode = normalizeRoomCode(data.roomCode);
         const room = rooms[rCode];
         if (!room) return;
         if (room.hostToken === data.token) {
@@ -163,7 +163,11 @@ io.on('connection', (socket) => {
             return;
         }
 
-        const roomCode = Math.floor(1000 + Math.random() * 9000).toString();
+        let roomCode;
+        do {
+            roomCode = Math.floor(1000 + Math.random() * 9000).toString();
+        } while (rooms[roomCode]);
+
         const winScore = parseInt(settings.winScore) || 3;
         rooms[roomCode] = {
             hostToken: settings.token,
@@ -181,16 +185,21 @@ io.on('connection', (socket) => {
         console.log(`🏠 Giải đấu [${roomCode}] được tạo bởi ${playerName}.`);
     });
 
-    socket.on('joinRoom', (data) => {
+    socket.on('joinRoom', (data, callback) => {
         const roomCode = normalizeRoomCode(data.roomCode);
         const playerName = (data.playerName || '').trim();
+        const ack = typeof callback === 'function' ? callback : () => {};
 
         if (!/^\d{4}$/.test(roomCode)) {
-            socket.emit('errorMsg', 'Mã phòng phải có đúng 4 chữ số!');
+            const err = 'Mã phòng phải có đúng 4 chữ số!';
+            socket.emit('errorMsg', err);
+            ack({ ok: false, error: err });
             return;
         }
         if (!playerName) {
-            socket.emit('errorMsg', 'Vui lòng nhập tên của bạn!');
+            const err = 'Vui lòng nhập tên của bạn!';
+            socket.emit('errorMsg', err);
+            ack({ ok: false, error: err });
             return;
         }
 
@@ -208,10 +217,13 @@ io.on('connection', (socket) => {
             socket.emit('roomCreated', { roomCode, isHost: false });
             io.to(roomCode).emit('updateWaitingRoom', room.players);
             console.log(`✅ [${playerName}] vào phòng [${roomCode}] (${room.players.length} người)`);
+            ack({ ok: true, roomCode });
         } else {
             const reason = room ? 'đã bắt đầu' : 'không tồn tại';
+            const err = 'Mã phòng không tồn tại hoặc giải đấu đã bắt đầu!';
             console.log(`❌ [${playerName}] không vào được phòng [${roomCode}] — ${reason}`);
-            socket.emit('errorMsg', 'Mã phòng không tồn tại hoặc giải đấu đã bắt đầu!');
+            socket.emit('errorMsg', err);
+            ack({ ok: false, error: err });
         }
     });
 
