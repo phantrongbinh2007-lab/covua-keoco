@@ -123,6 +123,15 @@ function makeByeMatch(p1) {
     };
 }
 
+function shuffleArray(arr) {
+    const a = [...arr];
+    for (let i = a.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [a[i], a[j]] = [a[j], a[i]];
+    }
+    return a;
+}
+
 function generateNextRound(room) {
     const players = [...room.activePlayers];
     const n = players.length;
@@ -132,23 +141,34 @@ function generateNextRound(room) {
     if (isFirstRound) {
         const bracketSize = Math.pow(2, Math.ceil(Math.log2(Math.max(n, 2))));
         const numByes = bracketSize - n;
-        let idx = 0;
 
-        for (let b = 0; b < numByes; b++) {
-            matches.push(makeByeMatch(players[idx++]));
-        }
-        while (idx + 1 < n) {
-            matches.push(makeMatch(players[idx], players[idx + 1]));
-            idx += 2;
+        if (numByes > 0) {
+            const shuffled = shuffleArray(players);
+            const byePlayers = shuffled.slice(0, numByes);
+            const playingPlayers = shuffled.slice(numByes);
+            for (const p of byePlayers) {
+                matches.push(makeByeMatch(p));
+            }
+            for (let i = 0; i + 1 < playingPlayers.length; i += 2) {
+                matches.push(makeMatch(playingPlayers[i], playingPlayers[i + 1]));
+            }
+            shuffleArray(matches);
+        } else if (n === 1) {
+            matches.push(makeByeMatch(players[0]));
+        } else {
+            for (let i = 0; i + 1 < n; i += 2) {
+                matches.push(makeMatch(players[i], players[i + 1]));
+            }
         }
     } else {
+        const shuffled = shuffleArray(players);
         let idx = 0;
-        while (idx + 1 < n) {
-            matches.push(makeMatch(players[idx], players[idx + 1]));
+        while (idx + 1 < shuffled.length) {
+            matches.push(makeMatch(shuffled[idx], shuffled[idx + 1]));
             idx += 2;
         }
-        if (idx < n) {
-            matches.push(makeByeMatch(players[idx]));
+        if (idx < shuffled.length) {
+            matches.push(makeByeMatch(shuffled[idx]));
         }
     }
 
@@ -193,8 +213,8 @@ function deserializeRoom(code, data) {
 
 function persistRoom(roomCode) {
     const room = rooms[roomCode];
-    if (!room) return;
-    dbSet(`rooms/${roomCode}`, serializeRoom(room)).catch(err => {
+    if (!room) return Promise.resolve();
+    return dbSet(`rooms/${roomCode}`, serializeRoom(room)).catch(err => {
         console.error(`❌ Lưu phòng [${roomCode}]:`, err.message);
     });
 }
@@ -398,9 +418,15 @@ function checkAndAdvanceTournament(room, roomCode) {
             .map(m => (m.winner && !m.winner.isDoubleLoss ? m.winner : null))
             .filter(Boolean);
 
+        const realMatchCount = room.currentRoundMatches.filter(m => !m.isBye).length;
+
         if (room.activePlayers.length === 1) {
-            addScore(room.activePlayers[0].name, 10);
-            finishTournament(room, roomCode, room.activePlayers[0].name);
+            if (realMatchCount > 1) {
+                setTimeout(() => { startNewRound(room, roomCode); }, 2000);
+            } else {
+                addScore(room.activePlayers[0].name, 10);
+                finishTournament(room, roomCode, room.activePlayers[0].name);
+            }
         } else if (room.activePlayers.length > 1) {
             setTimeout(() => { startNewRound(room, roomCode); }, 2000);
         } else {
@@ -641,14 +667,14 @@ io.on('connection', (socket) => {
             status: 'waiting'
         };
         joinPlayerChannels(socket, settings.token, roomCode);
-        persistRoom(roomCode);
+        await persistRoom(roomCode);
         socket.emit('roomCreated', {
             roomCode, isHost: true,
             maxPlayers: MAX_PLAYERS, playerCount: 1
         });
         emitWaitingRoomUpdate(roomCode, rooms[roomCode]);
         console.log(`🏠 Giải đấu [${roomCode}] được tạo bởi ${playerName}.`);
-        ack({ ok: true, roomCode, maxPlayers: MAX_PLAYERS });
+        ack({ ok: true, roomCode, isHost: true, playerCount: 1, maxPlayers: MAX_PLAYERS });
     });
 
     socket.on('joinRoom', async (data, callback) => {
@@ -669,46 +695,60 @@ io.on('connection', (socket) => {
             return;
         }
 
-        const room = await ensureRoom(roomCode);
-        if (room && (room.status === 'waiting' || room.status === 'countdown')) {
-            const existingPlayer = room.players.find(p => p.token === data.token);
+        let room = await ensureRoom(roomCode);
+        if (!room) {
+            await new Promise(r => setTimeout(r, 400));
+            room = await ensureRoom(roomCode);
+        }
 
-            if (isNameTaken(room, playerName, data.token)) {
-                const err = 'Tên này đã có người dùng trong phòng. Hãy chọn tên khác!';
-                socket.emit('errorMsg', err);
-                ack({ ok: false, error: err });
-                return;
-            }
-
-            if (!existingPlayer && room.players.length >= MAX_PLAYERS) {
-                const err = `Phòng đã đủ ${MAX_PLAYERS} người!`;
-                socket.emit('errorMsg', err);
-                ack({ ok: false, error: err });
-                return;
-            }
-
-            if (existingPlayer) {
-                clearPlayerDisconnectTimer(existingPlayer);
-                existingPlayer.id = socket.id;
-                existingPlayer.name = playerName;
-            } else {
-                room.players.push({ id: socket.id, token: data.token, name: playerName });
-            }
-
-            joinPlayerChannels(socket, data.token, roomCode);
-            persistRoom(roomCode);
-            socket.emit('roomCreated', {
-                roomCode, isHost: false,
-                maxPlayers: MAX_PLAYERS, playerCount: room.players.length
-            });
-            emitWaitingRoomUpdate(roomCode, room);
-            console.log(`✅ [${playerName}] vào phòng [${roomCode}] (${room.players.length}/${MAX_PLAYERS})`);
-            ack({ ok: true, roomCode });
-        } else {
-            const err = 'Mã phòng không tồn tại hoặc giải đấu đã bắt đầu!';
+        if (!room) {
+            const err = 'Không tìm thấy mã phòng. Kiểm tra lại 4 chữ số hoặc nhờ chủ giải chia sẻ mã mới!';
             socket.emit('errorMsg', err);
             ack({ ok: false, error: err });
+            return;
         }
+
+        if (room.status !== 'waiting' && room.status !== 'countdown') {
+            const err = 'Giải đấu đã bắt đầu — không thể vào phòng lúc này. Hãy vào trước khi chủ giải bấm Bắt Đầu!';
+            socket.emit('errorMsg', err);
+            ack({ ok: false, error: err });
+            return;
+        }
+
+        const existingPlayer = room.players.find(p => p.token === data.token);
+
+        if (isNameTaken(room, playerName, data.token)) {
+            const err = 'Tên này đã có người khác dùng trong phòng. Hãy thêm số hoặc ký tự (vd: Minh2)!';
+            socket.emit('errorMsg', err);
+            ack({ ok: false, error: err });
+            return;
+        }
+
+        if (!existingPlayer && room.players.length >= MAX_PLAYERS) {
+            const err = `Phòng đã đủ ${MAX_PLAYERS} người!`;
+            socket.emit('errorMsg', err);
+            ack({ ok: false, error: err });
+            return;
+        }
+
+        if (existingPlayer) {
+            clearPlayerDisconnectTimer(existingPlayer);
+            existingPlayer.id = socket.id;
+            existingPlayer.name = playerName;
+        } else {
+            room.players.push({ id: socket.id, token: data.token, name: playerName });
+        }
+
+        joinPlayerChannels(socket, data.token, roomCode);
+        await persistRoom(roomCode);
+        const roomPayload = {
+            roomCode, isHost: room.hostToken === data.token,
+            maxPlayers: MAX_PLAYERS, playerCount: room.players.length
+        };
+        socket.emit('roomCreated', roomPayload);
+        emitWaitingRoomUpdate(roomCode, room);
+        console.log(`✅ [${playerName}] vào phòng [${roomCode}] (${room.players.length}/${MAX_PLAYERS})`);
+        ack({ ok: true, ...roomPayload });
     });
 
     socket.on('startTournament', (data) => {

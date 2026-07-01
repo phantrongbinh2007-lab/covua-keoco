@@ -45,7 +45,31 @@ let pendingJoin = null;
 let joinTimeoutId = null;
 let pendingCreate = null;
 let createTimeoutId = null;
+let autoReconnectCancelled = false;
 const MAX_PLAYERS = 64;
+
+function applyJoinedRoom(data) {
+    if (!data || !data.roomCode) return;
+    clearPendingJoin();
+    clearPendingCreate();
+    myRoomCode = data.roomCode;
+    sessionStorage.setItem('currentRoomCode', myRoomCode);
+    $('#lobbyMsg').text('');
+    $('#lobby').hide();
+    $('#bracketArea').hide();
+    $('#gameArea').hide();
+    $('#waitingRoom').show();
+    $('#waitRoomCode').text(data.roomCode);
+    $('#startTournamentBtn').prop('disabled', true);
+    if (data.isHost) {
+        $('#startTournamentBtn').show().text('Bắt Đầu Bốc Thăm & Đấu');
+        $('#waitStatus').text('Bạn là chủ giải — chia sẻ mã phòng cho tối đa 64 người!');
+    } else {
+        $('#startTournamentBtn').hide();
+        $('#waitStatus').text('Đang chờ chủ phòng bắt đầu...');
+    }
+    $('#waitPlayerCount').text(`${data.playerCount || 1}/${data.maxPlayers || MAX_PLAYERS} người`);
+}
 
 function clearPendingJoin() {
     pendingJoin = null;
@@ -89,7 +113,7 @@ function doJoinRoom() {
             joinTimeoutId = null;
         }
         if (res && res.ok) {
-            clearPendingJoin();
+            applyJoinedRoom(res);
         } else if (res && !res.ok) {
             clearPendingJoin();
             if ($('#lobby').is(':visible')) {
@@ -141,7 +165,7 @@ function doCreateRoom() {
             createTimeoutId = null;
         }
         if (res && res.ok) {
-            clearPendingCreate();
+            applyJoinedRoom(res);
         } else if (res && !res.ok) {
             clearPendingCreate();
             if ($('#lobby').is(':visible')) {
@@ -258,6 +282,7 @@ $(document).ready(function() {
     const savedRoom = normalizeRoomCode(sessionStorage.getItem('currentRoomCode'));
     if (savedRoom.length === 4) {
         whenSocketReady(() => {
+            if (autoReconnectCancelled) return;
             socket.emit('reconnectUser', { roomCode: savedRoom, token: myToken });
         });
     } else if (sessionStorage.getItem('currentRoomCode')) {
@@ -288,6 +313,7 @@ $(document).ready(function() {
         if (isNaN(winScore) || winScore < 3) winScore = 3;
 
         whenSocketReady(() => {
+            autoReconnectCancelled = true;
             sessionStorage.removeItem('currentRoomCode');
             myRoomCode = null;
             attemptCreateRoom({ playerName: name, level: selectedLevel, winScore: winScore, token: myToken });
@@ -305,6 +331,7 @@ $(document).ready(function() {
         $('#roomCode').val(code);
 
         whenSocketReady(() => {
+            autoReconnectCancelled = true;
             sessionStorage.removeItem('currentRoomCode');
             myRoomCode = null;
             attemptJoinRoom(code, name);
@@ -415,25 +442,7 @@ socket.on('reconnectFailed', () => {
 });
 
 socket.on('roomCreated', (data) => {
-    clearPendingJoin();
-    clearPendingCreate();
-    myRoomCode = data.roomCode;
-    sessionStorage.setItem('currentRoomCode', myRoomCode);
-    $('#lobbyMsg').text('');
-    $('#lobby').hide();
-    $('#bracketArea').hide();
-    $('#gameArea').hide();
-    $('#waitingRoom').show();
-    $('#waitRoomCode').text(data.roomCode);
-    $('#startTournamentBtn').prop('disabled', true);
-    if (data.isHost) {
-        $('#startTournamentBtn').show().text('Bắt Đầu Bốc Thăm & Đấu');
-        $('#waitStatus').text('Bạn là chủ giải — chia sẻ mã phòng cho tối đa 64 người!');
-    } else {
-        $('#startTournamentBtn').hide();
-        $('#waitStatus').text('Đang chờ chủ phòng bắt đầu...');
-    }
-    $('#waitPlayerCount').text(`${data.playerCount || 1}/${data.maxPlayers || MAX_PLAYERS} người`);
+    applyJoinedRoom(data);
 });
 socket.on('updateLeaderboard', (data) => {
     globalLeaderboard = data || { daily: {}, weekly: {}, monthly: {} };
