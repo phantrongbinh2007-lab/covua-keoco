@@ -188,7 +188,7 @@ function serializeRoom(room) {
         hostToken: room.hostToken,
         players: room.players.map(p => ({ id: p.id, token: p.token, name: p.name })),
         activePlayers: (room.activePlayers || []).map(p => ({ id: p.id, token: p.token, name: p.name })),
-        bracket: room.bracket,
+        bracket: (room.bracket || []).map(round => round.map(serializeMatch)),
         currentRoundMatches: (room.currentRoundMatches || []).map(serializeMatch),
         level: room.level,
         winScore: room.winScore,
@@ -205,7 +205,7 @@ function deserializeRoom(code, data) {
         roomCode: code,
         players: (data.players || []).map(p => ({ ...p, disconnectTimer: null })),
         activePlayers: data.activePlayers || [],
-        bracket: data.bracket || [],
+        bracket: (data.bracket || []).map(round => round.map(m => ({ ...m, timerId: null }))),
         eliminationOrder: data.eliminationOrder || [],
         currentRoundMatches: (data.currentRoundMatches || []).map(m => ({ ...m, timerId: null }))
     };
