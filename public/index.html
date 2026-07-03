@@ -93,7 +93,11 @@
         <div id="waitingRoom" style="display: none;">
             <h2>Mã Giải Đấu: <strong id="waitRoomCode" style="color:#d9534f; font-size: 30px;"></strong></h2>
             <p id="waitPlayerCount" style="font-size: 18px; color: #27ae60; font-weight: bold; margin: 8px 0;">0/64 người</p>
-            <p>Chia sẻ mã này cho học viên vào giải (tối đa 64 người)!</p>
+            <p>Chia sẻ mã hoặc link mời cho học viên vào giải (tối đa 64 người)!</p>
+            <div id="inviteBox">
+                <input type="text" id="inviteLink" readonly>
+                <button id="copyInviteBtn">🔗 Sao chép link mời</button>
+            </div>
             <div class="settings-box"><label>Tuyển thủ tham gia:</label><ul id="playerList"></ul></div>
             <button id="startTournamentBtn" style="display: none; margin-bottom: 10px;">Bắt Đầu Bốc Thăm & Đấu</button>
             <button id="leaveRoomBtn" style="background: #7f8c8d; display: block; margin: 0 auto;">⬅ Hủy & Rời Phòng</button>

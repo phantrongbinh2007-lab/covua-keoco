@@ -37,6 +37,15 @@ function normalizeRoomCode(raw) {
     return (raw || '').trim().replace(/\D/g, '');
 }
 
+function buildInviteLink(roomCode) {
+    return `${location.origin}${location.pathname}?room=${roomCode}`;
+}
+
+function updateInviteLink(roomCode) {
+    if (!roomCode) return;
+    $('#inviteLink').val(buildInviteLink(roomCode));
+}
+
 function escapeHtml(text) {
     return $('<span>').text(text || '').html();
 }
@@ -60,6 +69,7 @@ function applyJoinedRoom(data) {
     $('#gameArea').hide();
     $('#waitingRoom').show();
     $('#waitRoomCode').text(data.roomCode);
+    updateInviteLink(data.roomCode);
     $('#startTournamentBtn').prop('disabled', true);
     if (data.isHost) {
         $('#startTournamentBtn').show().text('Bắt Đầu Bốc Thăm & Đấu');
@@ -279,14 +289,37 @@ function renderTournamentResults(data) {
 }
 
 $(document).ready(function() {
+    const savedName = (localStorage.getItem('chessTugName') || '').trim();
+    if (savedName) $('#playerName').val(savedName);
+
+    const inviteRoom = normalizeRoomCode(new URLSearchParams(location.search).get('room'));
     const savedRoom = normalizeRoomCode(sessionStorage.getItem('currentRoomCode'));
-    if (savedRoom.length === 4) {
+
+    if (savedRoom.length === 4 && (!inviteRoom || inviteRoom === savedRoom)) {
         whenSocketReady(() => {
             if (autoReconnectCancelled) return;
             socket.emit('reconnectUser', { roomCode: savedRoom, token: myToken });
         });
-    } else if (sessionStorage.getItem('currentRoomCode')) {
-        sessionStorage.removeItem('currentRoomCode');
+    } else {
+        if (sessionStorage.getItem('currentRoomCode')) {
+            sessionStorage.removeItem('currentRoomCode');
+        }
+        if (inviteRoom.length === 4) {
+            $('#roomCode').val(inviteRoom);
+            // Dọn URL để tránh tự vào lại khi tải lại trang
+            history.replaceState({}, '', location.pathname);
+            if (savedName) {
+                $('#lobbyMsg').text(`Bạn được mời vào giải ${inviteRoom}. Đang vào...`);
+                whenSocketReady(() => {
+                    autoReconnectCancelled = true;
+                    myRoomCode = null;
+                    attemptJoinRoom(inviteRoom, savedName);
+                });
+            } else {
+                $('#lobbyMsg').text(`Bạn được mời vào giải ${inviteRoom}! Nhập tên rồi bấm "Vào Giải".`);
+                $('#playerName').focus();
+            }
+        }
     }
 
     $('#showRulesBtn').on('click', () => { $('#rulesModal').css('display', 'flex'); });
@@ -307,6 +340,7 @@ $(document).ready(function() {
     $('#createBtn').on('click', () => {
         const name = $('#playerName').val().trim();
         if (!name) return $('#lobbyMsg').text("Vui lòng nhập tên của bạn!");
+        localStorage.setItem('chessTugName', name);
 
         const selectedLevel = $('#levelSelect').val();
         let winScore = parseInt($('#winScoreInput').val());
@@ -323,6 +357,7 @@ $(document).ready(function() {
     $('#joinBtn').on('click', () => {
         const name = $('#playerName').val().trim();
         if (!name) return $('#lobbyMsg').text("Vui lòng nhập tên của bạn!");
+        localStorage.setItem('chessTugName', name);
 
         const code = normalizeRoomCode($('#roomCode').val());
         if (code.length !== 4) {
@@ -346,6 +381,44 @@ $(document).ready(function() {
 
     $('#startTournamentBtn').on('click', () => {
         socket.emit('startTournament', { roomCode: myRoomCode, token: myToken });
+    });
+
+    $('#copyInviteBtn').on('click', async () => {
+        if (!myRoomCode) return;
+        const link = buildInviteLink(myRoomCode);
+        const flashCopied = () => {
+            const $btn = $('#copyInviteBtn');
+            $btn.addClass('copied').text('✅ Đã sao chép!');
+            setTimeout(() => $btn.removeClass('copied').text('🔗 Sao chép link mời'), 2000);
+        };
+
+        if (navigator.share) {
+            try {
+                await navigator.share({
+                    title: 'Giải Cờ Vua Kéo Co',
+                    text: `Vào giải cờ vua kéo co (mã ${myRoomCode}):`,
+                    url: link
+                });
+                return;
+            } catch (err) {
+                if (err && err.name === 'AbortError') return;
+            }
+        }
+
+        try {
+            await navigator.clipboard.writeText(link);
+            flashCopied();
+        } catch (err) {
+            const input = document.getElementById('inviteLink');
+            input.focus();
+            input.select();
+            try {
+                document.execCommand('copy');
+                flashCopied();
+            } catch (e) {
+                $('#waitStatus').text('Không tự sao chép được — hãy copy link thủ công phía trên.');
+            }
+        }
     });
     $('#backToLobbyBtn').on('click', () => { sessionStorage.removeItem('currentRoomCode'); window.location.reload(); });
 
