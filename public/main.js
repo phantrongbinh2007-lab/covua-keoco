@@ -35,6 +35,7 @@ let puzzleTimerInterval = null;
 let boardOrientation = 'white';
 let currentPuzzleSeed = null;
 let submitInFlight = false;
+let puzzleEpoch = 0; // tăng mỗi lần loadPuzzle — bỏ qua ACK cũ
 
 let globalLeaderboard = { daily: {}, weekly: {}, monthly: {}, periods: {} };
 let currentLbTab = 'daily';
@@ -1123,6 +1124,8 @@ function onCgAfterMove(orig, dest) {
 
 function loadPuzzle(seed, acceptedMoves) {
     if (!puzzleList || puzzleList.length === 0) return;
+    puzzleEpoch += 1;
+    const epochAtLoad = puzzleEpoch;
     currentPuzzleSeed = seed;
     currentPuzzle = puzzleList[seed % puzzleList.length];
     currentMoveIndex = 0;
@@ -1162,7 +1165,11 @@ function loadPuzzle(seed, acceptedMoves) {
     syncGround({ lastMove });
 
     if (currentMoveIndex % 2 === 0) {
-        computerMoveTimer = setTimeout(makeComputerMove, restored.length ? 180 : 450);
+        computerMoveTimer = setTimeout(() => {
+            // Bỏ qua nếu đã sang puzzle khác
+            if (epochAtLoad !== puzzleEpoch) return;
+            makeComputerMove(epochAtLoad);
+        }, restored.length ? 180 : 450);
     } else if (!isSpectator) {
         $('#status').text(currentMoveIndex === 1
             ? '🔥 Nước đi sai lầm của địch! Trừng phạt ngay!'
@@ -1170,11 +1177,11 @@ function loadPuzzle(seed, acceptedMoves) {
     }
 }
 
-function makeComputerMove() {
+function makeComputerMove(expectedEpoch) {
+    if (expectedEpoch != null && expectedEpoch !== puzzleEpoch) return;
     if (!currentPuzzle) return;
     if (currentMoveIndex % 2 !== 0) return;
     if (currentMoveIndex >= currentPuzzle.solution.length) return;
-    if (moveSubmitPending || submitInFlight) return;
 
     const idx = currentMoveIndex;
     let lastMove = applySolutionIndex(idx);
@@ -1200,6 +1207,8 @@ function makeComputerMove() {
         return;
     }
 
+    if (expectedEpoch != null && expectedEpoch !== puzzleEpoch) return;
+
     currentMoveIndex = idx + 1;
     syncGround({ lastMove });
     playComputerMove();
@@ -1217,7 +1226,11 @@ function submitPlayerMove(moveStr, playedIndex, onReject) {
     submitInFlight = true;
     syncGround();
 
+    const epochAtSubmit = puzzleEpoch;
+    const roundAtSubmit = currentPuzzleRound;
+
     const safety = setTimeout(() => {
+        if (epochAtSubmit !== puzzleEpoch) return;
         if (!moveSubmitPending && !submitInFlight) return;
         moveSubmitPending = false;
         submitInFlight = false;
@@ -1228,10 +1241,18 @@ function submitPlayerMove(moveStr, playedIndex, onReject) {
     socket.emit('submit_move', {
         roomCode: myRoomCode,
         token: myToken,
-        puzzleRound: currentPuzzleRound,
+        puzzleRound: roundAtSubmit,
         move: moveStr
     }, (res) => {
         clearTimeout(safety);
+
+        // Puzzle đã đổi (update_game thắng race) — bỏ qua ACK cũ, không đụng board
+        if (epochAtSubmit !== puzzleEpoch || roundAtSubmit !== currentPuzzleRound) {
+            moveSubmitPending = false;
+            submitInFlight = false;
+            return;
+        }
+
         moveSubmitPending = false;
         submitInFlight = false;
 
@@ -1247,22 +1268,23 @@ function submitPlayerMove(moveStr, playedIndex, onReject) {
             return;
         }
 
-        // Nước vừa đi là playedIndex; sau khi server OK → đứng ở playedIndex+1
-        const afterPlayerIndex = (typeof playedIndex === 'number' ? playedIndex : currentMoveIndex) + 1;
-
         if (res.solved) {
+            // Chỉ khóa UI chờ update_game — KHÔNG set currentMoveIndex = length
+            // (ACK đến sau update_game trước đây làm hỏng computer move puzzle mới)
             isMyTurnToSolve = false;
-            currentMoveIndex = currentPuzzle.solution.length;
             $('#status').text('Tuyệt vời! Đang giật dây kéo co...');
             syncGround();
             return;
         }
 
+        // Nước vừa đi là playedIndex; sau khi server OK → đứng ở playedIndex+1
+        const afterPlayerIndex = (typeof playedIndex === 'number' ? playedIndex : currentMoveIndex) + 1;
         currentMoveIndex = afterPlayerIndex;
         $('#status').text('Chính xác! Đợi máy phản đòn...');
         syncGround();
         if (computerMoveTimer) clearTimeout(computerMoveTimer);
-        computerMoveTimer = setTimeout(makeComputerMove, 400);
+        const epochForComputer = puzzleEpoch;
+        computerMoveTimer = setTimeout(() => makeComputerMove(epochForComputer), 400);
     });
 }
 
