@@ -5,10 +5,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Giải Đấu Cờ Vua Kéo Co</title>
     <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
-    <link rel="stylesheet" href="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.css">
-    <script src="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
     <script src="/socket.io/socket.io.js"></script>
+    <link rel="stylesheet" href="/vendor/chessground/assets/chessground.base.css">
+    <link rel="stylesheet" href="/vendor/chessground/assets/chessground.brown.css">
+    <link rel="stylesheet" href="/vendor/chessground/assets/chessground.cburnett.css">
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -176,7 +177,7 @@
                 <div id="pullFlash" class="pull-flash" aria-hidden="true"></div>
             </div>
 
-            <div id="board" style="width: 400px; margin: 20px auto; max-width: 100%;"></div>
+            <div id="board" class="cg-wrap"></div>
             <div id="status">Tập trung giải cờ...</div>
             <div id="emojiPanel">
                 <button class="emoji-btn" data-emoji="😂">😂</button>
@@ -188,6 +189,6 @@
     </div>
     
     <footer><p>Phát triển và thiết kế bởi <strong>Vua Lang Thang</strong> &copy; 2026</p></footer>
-    <script src="main.js"></script>
+    <script type="module" src="main.js"></script>
 </body>
 </html>

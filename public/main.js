@@ -1,3 +1,9 @@
+import { Chessground } from '/vendor/chessground/dist/chessground.min.js';
+
+const $ = window.jQuery;
+const Chess = window.Chess;
+const io = window.io;
+
 const socket = io({
     transports: ['polling', 'websocket'],
     reconnection: true,
@@ -6,7 +12,7 @@ const socket = io({
     timeout: 20000
 });
 let game = new Chess();
-let board = null;
+let ground = null;
 let myRoomCode = null;
 let isMyTurnToSolve = false; 
 let puzzleList = [];
@@ -16,11 +22,11 @@ let currentWinScore = 3;
 let currentPuzzleRound = 1; 
 let computerMoveTimer = null; 
 let amIP1 = true; 
-let selectedSquare = null;
 let isSpectator = false; 
 let currentRoundMode = 'regular';
 let puzzleDeadlineAt = null;
 let puzzleTimerInterval = null;
+let boardOrientation = 'white';
 
 let globalLeaderboard = { daily: {}, weekly: {}, monthly: {}, periods: {} };
 let currentLbTab = 'daily';
@@ -471,12 +477,6 @@ $(document).ready(function() {
         a.click();
         URL.revokeObjectURL(a.href);
     });
-    
-    $('#board').on('click', '.square-55d63', function() {
-        if (isSpectator) return; 
-        let square = $(this).attr('data-square');
-        if (square) handleSquareClick(square);
-    });
 
     $('.emoji-btn').on('click', function() {
         if (isSpectator) return;
@@ -704,7 +704,6 @@ socket.on('gameStart', (data) => {
     $('#opponentNameDisplay').text(data.opponentName || 'Đối thủ');
     $('#status').text("Đang tải dữ liệu cờ...").removeClass('disconnect-warn');
     startPuzzleTimer(data.deadlineAt, data.timeLimitMs);
-    initBoard();
     loadPuzzlesForLevel(data.level, function(puzzles) {
         puzzleList = puzzles; isMyTurnToSolve = true;
         updateMatchHud(data);
@@ -726,7 +725,6 @@ socket.on('spectateStart', (data) => {
     $('#opponentNameDisplay').text((data.p2Name || 'P2') + ' (P2)');
     $('#status').text("📺 Đang truyền hình trực tiếp...").removeClass('disconnect-warn');
     startPuzzleTimer(data.deadlineAt, data.timeLimitMs);
-    initBoard();
     loadPuzzlesForLevel(data.level, function(puzzles) {
         puzzleList = puzzles; isMyTurnToSolve = false;
         updateMatchHud(data);
@@ -936,15 +934,98 @@ function applyUciMove(uci) {
     return !!move;
 }
 
+function toDests(chess) {
+    const dests = new Map();
+    chess.SQUARES.forEach((sq) => {
+        const ms = chess.moves({ square: sq, verbose: true });
+        if (ms.length) dests.set(sq, ms.map((m) => m.to));
+    });
+    return dests;
+}
+
+function canPlayerMoveNow() {
+    return !isSpectator && isMyTurnToSolve && !moveSubmitPending
+        && !!currentPuzzle && (currentMoveIndex % 2 === 1)
+        && currentMoveIndex < currentPuzzle.solution.length;
+}
+
+function syncGround(extra = {}) {
+    if (!ground) return;
+    const turnColor = game.turn() === 'w' ? 'white' : 'black';
+    const playable = canPlayerMoveNow();
+    ground.set({
+        fen: game.fen(),
+        orientation: boardOrientation,
+        turnColor,
+        check: game.in_check(),
+        lastMove: extra.lastMove || undefined,
+        viewOnly: isSpectator,
+        movable: {
+            color: playable ? turnColor : undefined,
+            dests: playable ? toDests(game) : new Map(),
+            free: false,
+            showDests: true,
+            events: { after: onCgAfterMove }
+        },
+        draggable: { enabled: playable, distance: 3, autoDistance: true, showGhost: true },
+        selectable: { enabled: playable },
+        premovable: { enabled: false },
+        animation: { enabled: true, duration: 180 }
+    });
+}
+
+function onCgAfterMove(orig, dest) {
+    if (!canPlayerMoveNow()) {
+        syncGround();
+        return;
+    }
+
+    let expectedMoves = currentPuzzle.solution[currentMoveIndex];
+    if (!Array.isArray(expectedMoves)) expectedMoves = [expectedMoves];
+
+    const matchExpected = expectedMoves.find(m => m.length >= 4 && m.startsWith(orig + dest));
+    const promoPiece = matchExpected && matchExpected.length > 4 ? matchExpected[4] : 'q';
+    const move = game.move({ from: orig, to: dest, promotion: promoPiece });
+
+    if (!move) {
+        syncGround();
+        return;
+    }
+
+    const moveStr = orig + dest + (move.promotion ? move.promotion : '');
+
+    if (expectedMoves.includes(moveStr)) {
+        syncGround({ lastMove: [orig, dest] });
+        submitPlayerMove(moveStr, () => {
+            game.undo();
+            syncGround();
+        });
+        return;
+    }
+
+    // Sai lời giải
+    game.undo();
+    if (!isSpectator && currentRoundMode === 'sudden_death') {
+        syncGround();
+        submitPlayerMove(moveStr, () => {});
+        return;
+    }
+    $('#status').text('Đi sai rồi. Tính lại đi!');
+    syncGround();
+}
+
 function loadPuzzle(seed, acceptedMoves) {
     if (!puzzleList || puzzleList.length === 0) return;
     currentPuzzle = puzzleList[seed % puzzleList.length];
-    currentMoveIndex = 0; selectedSquare = null; $('.square-55d63').removeClass('highlight-square');
-    game.load(currentPuzzle.fen);
+    currentMoveIndex = 0;
     moveSubmitPending = false;
+    if (!isSpectator) isMyTurnToSolve = true;
+
+    game.load(currentPuzzle.fen);
 
     const restored = Array.isArray(acceptedMoves) ? acceptedMoves : [];
     const totalApplied = restored.length * 2;
+    let lastMove = null;
     for (let i = 0; i < totalApplied && i < currentPuzzle.solution.length; i++) {
         let uci;
         if (i % 2 === 1) {
@@ -953,45 +1034,83 @@ function loadPuzzle(seed, acceptedMoves) {
             const moveRaw = currentPuzzle.solution[i];
             uci = Array.isArray(moveRaw) ? moveRaw[0] : moveRaw;
         }
-        applyUciMove(uci);
-        currentMoveIndex = i + 1;
+        if (applyUciMove(uci)) {
+            lastMove = [uci.substring(0, 2), uci.substring(2, 4)];
+            currentMoveIndex = i + 1;
+        }
     }
 
-    board.position(game.fen(), false);
     const startTurn = (currentPuzzle.fen.split(' ')[1] || 'w');
-    board.orientation(startTurn === 'w' ? 'black' : 'white');
-    if (computerMoveTimer) clearTimeout(computerMoveTimer);
+    boardOrientation = startTurn === 'w' ? 'black' : 'white';
+    initBoard();
+
+    if (computerMoveTimer) {
+        clearTimeout(computerMoveTimer);
+        computerMoveTimer = null;
+    }
 
     if (currentMoveIndex >= currentPuzzle.solution.length) {
         isMyTurnToSolve = false;
+        syncGround({ lastMove });
         return;
     }
 
     if (currentMoveIndex % 2 === 0) {
-        computerMoveTimer = setTimeout(makeComputerMove, restored.length ? 200 : 600);
-    } else if (!isSpectator) {
-        $('#status').text(currentMoveIndex === 1 ? "🔥 Nước đi sai lầm của địch! Trừng phạt ngay!" : "Địch đáp trả! Tính tiếp đi!");
+        syncGround({ lastMove });
+        computerMoveTimer = setTimeout(makeComputerMove, restored.length ? 200 : 500);
+    } else {
+        syncGround({ lastMove });
+        if (!isSpectator) {
+            $('#status').text(currentMoveIndex === 1
+                ? '🔥 Nước đi sai lầm của địch! Trừng phạt ngay!'
+                : 'Địch đáp trả! Tính tiếp đi!');
+        }
     }
 }
 
 function makeComputerMove() {
     if (!currentPuzzle || currentMoveIndex >= currentPuzzle.solution.length) return;
+    if (currentMoveIndex % 2 !== 0) return;
+
     let moveRaw = currentPuzzle.solution[currentMoveIndex];
-    let move = Array.isArray(moveRaw) ? moveRaw[0] : moveRaw; 
-    game.move({ from: move.substring(0, 2), to: move.substring(2, 4), promotion: move.length > 4 ? move[4] : 'q' });
-    board.position(game.fen()); currentMoveIndex++; 
-    if (!isSpectator) { $('#status').text(currentMoveIndex === 1 ? "🔥 Nước đi sai lầm của địch! Trừng phạt ngay!" : "Địch đáp trả! Tính tiếp đi!"); }
+    let moveUci = Array.isArray(moveRaw) ? moveRaw[0] : moveRaw;
+    const from = moveUci.substring(0, 2);
+    const to = moveUci.substring(2, 4);
+    const promo = moveUci.length > 4 ? moveUci[4] : 'q';
+
+    if (!game.move({ from, to, promotion: promo })) {
+        console.warn('Computer move failed', moveUci);
+        return;
+    }
+    currentMoveIndex++;
+    syncGround({ lastMove: [from, to] });
+
+    if (!isSpectator) {
+        $('#status').text(currentMoveIndex === 1
+            ? '🔥 Nước đi sai lầm của địch! Trừng phạt ngay!'
+            : 'Địch đáp trả! Tính tiếp đi!');
+    }
 }
 
 function submitPlayerMove(moveStr, onReject) {
     if (moveSubmitPending || isSpectator) return;
     moveSubmitPending = true;
+    syncGround();
+
+    const safety = setTimeout(() => {
+        if (!moveSubmitPending) return;
+        moveSubmitPending = false;
+        $('#status').text('Máy chủ phản hồi chậm — thử lại nước đi.');
+        syncGround();
+    }, 8000);
+
     socket.emit('submit_move', {
         roomCode: myRoomCode,
         token: myToken,
         puzzleRound: currentPuzzleRound,
         move: moveStr
     }, (res) => {
+        clearTimeout(safety);
         moveSubmitPending = false;
         if (!res || !res.ok) {
             if (typeof onReject === 'function') onReject(res);
@@ -1001,109 +1120,49 @@ function submitPlayerMove(moveStr, onReject) {
             } else {
                 $('#status').text((res && res.error) || 'Nước không được chấp nhận.');
             }
+            syncGround();
             return;
         }
         currentMoveIndex++;
-        board.position(game.fen());
         if (res.solved) {
             isMyTurnToSolve = false;
-            $('#status').text("Tuyệt vời! Đang giật dây kéo co...");
+            $('#status').text('Tuyệt vời! Đang giật dây kéo co...');
+            syncGround();
         } else {
-            $('#status').text("Chính xác! Đợi máy phản đòn...");
+            $('#status').text('Chính xác! Đợi máy phản đòn...');
+            syncGround();
             if (computerMoveTimer) clearTimeout(computerMoveTimer);
-            computerMoveTimer = setTimeout(makeComputerMove, 600);
+            computerMoveTimer = setTimeout(makeComputerMove, 500);
         }
     });
 }
 
-function handleSquareClick(square) {
-    if (isSpectator || !isMyTurnToSolve || moveSubmitPending || currentMoveIndex % 2 === 0) return; 
-    let piece = game.get(square); let turnColor = game.turn();
-
-    if (!selectedSquare) {
-        if (piece && piece.color === turnColor) {
-            selectedSquare = square; 
-            $('.square-55d63').removeClass('highlight-square'); 
-            $('.square-' + square).addClass('highlight-square');
-        } return;
-    }
-
-    if (selectedSquare === square) {
-        selectedSquare = null; $('.square-55d63').removeClass('highlight-square');
-        return;
-    }
-
-    let expectedMoves = currentPuzzle.solution[currentMoveIndex];
-    if (!Array.isArray(expectedMoves)) expectedMoves = [expectedMoves];
-
-    let matchExpected = expectedMoves.find(m => m.length === 5 && m.startsWith(selectedSquare + square));
-    let promoPiece = matchExpected ? matchExpected[4] : 'q';
-    let move = game.move({ from: selectedSquare, to: square, promotion: promoPiece });
-    
-    if (move) {
-        $('.square-55d63').removeClass('highlight-square');
-        let moveStr = selectedSquare + square + (move.promotion ? move.promotion : '');
-        selectedSquare = null;
-
-        if (expectedMoves.includes(moveStr)) {
-            submitPlayerMove(moveStr, () => {
-                game.undo();
-                board.position(game.fen());
-            });
-        } else { 
-            game.undo();
-            board.position(game.fen());
-            if (!isSpectator && currentRoundMode === 'sudden_death') {
-                submitPlayerMove(moveStr, () => {});
-            } else {
-                $('#status').text("Đi sai rồi. Tính lại đi!");
-            }
-        }
-    } else {
-        if (piece && piece.color === turnColor) {
-            selectedSquare = square; $('.square-55d63').removeClass('highlight-square'); $('.square-' + square).addClass('highlight-square');
-        } else { selectedSquare = null; $('.square-55d63').removeClass('highlight-square'); }
-    }
-}
-
-function onDragStart(source, piece, position, orientation) {
-    if (isSpectator || !isMyTurnToSolve || moveSubmitPending || currentMoveIndex % 2 === 0) return false; 
-    if ((orientation === 'white' && piece.search(/^b/) !== -1) || (orientation === 'black' && piece.search(/^w/) !== -1)) return false;
-    selectedSquare = null; $('.square-55d63').removeClass('highlight-square');
-}
-
-function onDrop(source, target) {
-    if (currentMoveIndex % 2 === 0 || moveSubmitPending) return 'snapback';
-    
-    let expectedMoves = currentPuzzle.solution[currentMoveIndex];
-    if (!Array.isArray(expectedMoves)) expectedMoves = [expectedMoves];
-
-    let matchExpected = expectedMoves.find(m => m.length === 5 && m.startsWith(source + target));
-    let promoPiece = matchExpected ? matchExpected[4] : 'q';
-    let move = game.move({ from: source, to: target, promotion: promoPiece });
-    
-    if (!move) return 'snapback'; 
-    
-    let moveStr = source + target + (move.promotion ? move.promotion : '');
-
-    if (expectedMoves.includes(moveStr)) {
-        submitPlayerMove(moveStr, () => {
-            game.undo();
-            board.position(game.fen());
-        });
-        return;
-    }
-
-    game.undo();
-    if (!isSpectator && currentRoundMode === 'sudden_death') {
-        submitPlayerMove(moveStr, () => {});
-    } else {
-        $('#status').text("Đi sai rồi. Tính lại đi!");
-    }
-    return 'snapback';
-}
-
 function initBoard() {
-    if (board) { board.position('start', false); return; }
-    board = Chessboard('board', { draggable: true, position: 'start', onDragStart: onDragStart, onDrop: onDrop, pieceTheme: 'https://chessboardjs.com/img/chesspieces/wikipedia/{piece}.png' });
+    const el = document.getElementById('board');
+    if (!el) return;
+    if (ground) {
+        try { ground.destroy(); } catch (e) { /* ignore */ }
+        ground = null;
+        el.innerHTML = '';
+    }
+    ground = Chessground(el, {
+        fen: game.fen(),
+        orientation: boardOrientation,
+        coordinates: true,
+        addPieceZIndex: true,
+        blockTouchScroll: true,
+        highlight: { lastMove: true, check: true },
+        animation: { enabled: true, duration: 180 },
+        movable: {
+            free: false,
+            color: undefined,
+            dests: new Map(),
+            showDests: true,
+            events: { after: onCgAfterMove }
+        },
+        draggable: { enabled: true, distance: 3, autoDistance: true, showGhost: true },
+        selectable: { enabled: true },
+        premovable: { enabled: false },
+        drawable: { enabled: false }
+    });
 }

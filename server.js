@@ -11,6 +11,9 @@ const server = http.createServer(app);
 const io = new Server(server);
 
 app.use(express.static('public'));
+app.use('/vendor/chessground', express.static(
+    path.join(__dirname, 'node_modules', '@lichess-org', 'chessground')
+));
 
 initFirebase();
 
