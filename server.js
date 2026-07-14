@@ -445,8 +445,12 @@ function serializeRoom(room) {
     return {
         roomCode: room.roomCode,
         hostToken: room.hostToken,
-        players: room.players.map(p => ({ id: p.id, token: p.token, name: p.name })),
-        activePlayers: (room.activePlayers || []).map(p => ({ id: p.id, token: p.token, name: p.name })),
+        players: room.players.map(p => ({
+            id: p.id, token: p.token, name: p.name, compete: p.compete !== false
+        })),
+        activePlayers: (room.activePlayers || []).map(p => ({
+            id: p.id, token: p.token, name: p.name, compete: p.compete !== false
+        })),
         bracket: (room.bracket || []).map(round => round.map(serializeMatch)),
         currentRoundMatches: (room.currentRoundMatches || []).map(serializeMatch),
         level: room.level,
@@ -611,16 +615,28 @@ function decideDoubleLoss(match) {
     match.winner = { token: null, id: null, name: 'Đồng thua', isDoubleLoss: true };
 }
 
-function sanitizePlayers(players) {
-    return players.map(({ id, token, name }) => ({
-        id, token, name, shortId: shortPlayerId(token)
+function sanitizePlayers(players, hostToken) {
+    return players.map(({ id, token, name, compete }) => ({
+        id,
+        token,
+        name,
+        shortId: shortPlayerId(token),
+        compete: compete !== false,
+        isHost: !!(hostToken && token === hostToken)
     }));
 }
 
+function getCompetitors(room) {
+    return (room.players || []).filter(p => p && p.compete !== false);
+}
+
 function emitWaitingRoomUpdate(roomCode, room) {
+    const competitors = getCompetitors(room);
     io.to(roomCode).emit('updateWaitingRoom', {
-        players: sanitizePlayers(room.players),
-        maxPlayers: MAX_PLAYERS
+        players: sanitizePlayers(room.players, room.hostToken),
+        maxPlayers: MAX_PLAYERS,
+        competitorCount: competitors.length,
+        hostToken: room.hostToken
     });
 }
 
@@ -1035,7 +1051,10 @@ io.on('connection', (socket) => {
         if (room.status === 'waiting' || room.status === 'countdown') {
             socket.emit('roomCreated', {
                 roomCode, isHost: room.hostToken === data.token,
-                maxPlayers: MAX_PLAYERS, playerCount: room.players.length,
+                maxPlayers: MAX_PLAYERS,
+                playerCount: getCompetitors(room).length,
+                competitorCount: getCompetitors(room).length,
+                compete: player.compete !== false,
                 shortId: shortPlayerId(data.token), playerName: player.name
             });
             emitWaitingRoomUpdate(roomCode, room);
@@ -1098,10 +1117,18 @@ io.on('connection', (socket) => {
         if (winScore < 3) winScore = 3;
         if (winScore > 10) winScore = 10;
 
+        // compete !== false: vừa tổ chức vừa đấu. false = chỉ ban tổ chức.
+        const compete = settings.compete !== false && settings.compete !== 'false';
+
         rooms[roomCode] = {
             roomCode,
             hostToken: settings.token,
-            players: [{ id: socket.id, token: settings.token, name: identity.name }],
+            players: [{
+                id: socket.id,
+                token: settings.token,
+                name: identity.name,
+                compete
+            }],
             activePlayers: [],
             bracket: [],
             currentRoundMatches: [],
@@ -1112,15 +1139,19 @@ io.on('connection', (socket) => {
         };
         joinPlayerChannels(socket, settings.token, roomCode);
         await persistRoom(roomCode);
+        const competitorCount = compete ? 1 : 0;
         const roomPayload = {
             roomCode, isHost: true,
-            maxPlayers: MAX_PLAYERS, playerCount: 1,
+            maxPlayers: MAX_PLAYERS,
+            playerCount: competitorCount,
+            competitorCount,
+            compete,
             shortId: identity.shortId, playerName: identity.name,
             nameLocked: true
         };
         socket.emit('roomCreated', roomPayload);
         emitWaitingRoomUpdate(roomCode, rooms[roomCode]);
-        console.log(`🏠 Giải đấu [${roomCode}] được tạo bởi ${identity.name} (#${identity.shortId}).`);
+        console.log(`🏠 Giải đấu [${roomCode}] tạo bởi ${identity.name} (#${identity.shortId}) — ${compete ? 'cũng tham gia đấu' : 'chỉ tổ chức'}.`);
         ack({ ok: true, ...roomPayload });
     });
 
@@ -1171,8 +1202,9 @@ io.on('connection', (socket) => {
             return;
         }
 
-        if (!existingPlayer && room.players.length >= MAX_PLAYERS) {
-            const err = `Phòng đã đủ ${MAX_PLAYERS} người!`;
+        const competitorCount = getCompetitors(room).length;
+        if (!existingPlayer && competitorCount >= MAX_PLAYERS) {
+            const err = `Phòng đã đủ ${MAX_PLAYERS} kỳ thủ!`;
             socket.emit('errorMsg', err);
             ack({ ok: false, error: err });
             return;
@@ -1182,22 +1214,33 @@ io.on('connection', (socket) => {
             clearPlayerDisconnectTimer(existingPlayer);
             existingPlayer.id = socket.id;
             existingPlayer.name = identity.name;
+            // Giữ nguyên compete (host tổ chức-only không bị thành player khi reconnect)
         } else {
-            room.players.push({ id: socket.id, token: data.token, name: identity.name });
+            room.players.push({
+                id: socket.id,
+                token: data.token,
+                name: identity.name,
+                compete: true
+            });
         }
 
         touchPlayer(data.token);
         joinPlayerChannels(socket, data.token, roomCode);
         await persistRoom(roomCode);
+        const me = room.players.find(p => p.token === data.token);
+        const competitorsNow = getCompetitors(room).length;
         const roomPayload = {
             roomCode, isHost: room.hostToken === data.token,
-            maxPlayers: MAX_PLAYERS, playerCount: room.players.length,
+            maxPlayers: MAX_PLAYERS,
+            playerCount: competitorsNow,
+            competitorCount: competitorsNow,
+            compete: me ? me.compete !== false : true,
             shortId: identity.shortId, playerName: identity.name,
             nameLocked: true
         };
         socket.emit('roomCreated', roomPayload);
         emitWaitingRoomUpdate(roomCode, room);
-        console.log(`✅ [${identity.name}#${identity.shortId}] vào phòng [${roomCode}] (${room.players.length}/${MAX_PLAYERS})`);
+        console.log(`✅ [${identity.name}#${identity.shortId}] vào phòng [${roomCode}] (${competitorsNow}/${MAX_PLAYERS} kỳ thủ)`);
         ack({ ok: true, ...roomPayload });
     });
 
@@ -1211,17 +1254,19 @@ io.on('connection', (socket) => {
             ? room.players.find(p => p.token === token)
             : room.players.find(p => p.id === socket.id);
         if (!player || room.hostToken !== player.token) return;
-        if (room.players.length < 2) {
-            socket.emit('waitNotice', 'Cần ít nhất 2 người để bắt đầu giải!');
+
+        const competitors = getCompetitors(room);
+        if (competitors.length < 2) {
+            socket.emit('waitNotice', 'Cần ít nhất 2 kỳ thủ thi đấu (không tính ban tổ chức) để bắt đầu!');
             return;
         }
 
         player.id = socket.id;
         joinPlayerChannels(socket, player.token, roomCode);
         room.status = 'countdown';
-        room.initialPlayerCount = room.players.length;
+        room.initialPlayerCount = competitors.length;
         room.eliminationOrder = [];
-        room.activePlayers = [...room.players].sort(() => Math.random() - 0.5);
+        room.activePlayers = [...competitors].sort(() => Math.random() - 0.5);
         persistRoom(roomCode);
 
         runCountdown(roomCode, TOURNAMENT_START_COUNTDOWN, 'tournamentCountdown', () => {

@@ -278,6 +278,21 @@ footer strong { color: #f1c40f; font-size: 18px; text-transform: uppercase; lett
 .player-id-hint { font-size: 13px; color: #7f8c8d; margin: 6px 0 0; }
 .player-id-hint.locked { color: #27ae60; font-weight: bold; }
 .player-short-id { font-size: 12px; color: #95a5a6; font-weight: normal; margin-left: 6px; }
+.host-role-label { margin-top: 14px !important; }
+.host-role-options { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; }
+.host-role-option {
+    display: flex; align-items: flex-start; gap: 8px; font-weight: normal !important;
+    margin: 0 !important; padding: 8px 10px; background: #f8f9fa; border-radius: 6px;
+    border: 1px solid #dde2e6; cursor: pointer; color: #333;
+}
+.host-role-option input { margin-top: 3px; }
+.host-role-option:has(input:checked) { border-color: #e67e22; background: #fff8f0; }
+.player-role-tag {
+    display: inline-block; font-size: 11px; font-weight: 700; margin-left: 8px;
+    padding: 2px 7px; border-radius: 4px; vertical-align: middle;
+}
+.player-role-tag.organizer { background: #fff3cd; color: #856404; }
+.player-role-tag.fighter { background: #d4edda; color: #155724; }
 .replay-btn { background: #8e44ad; padding: 5px 10px; font-size: 12px; margin-top: 8px; width: 100%; border-radius: 4px; }
 .replay-btn:hover { background: #7d3c98; }
 .replay-modal { max-width: 560px; max-height: 85vh; overflow-y: auto; }

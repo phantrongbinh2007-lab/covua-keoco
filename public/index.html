@@ -96,6 +96,17 @@
                 </select>
                 <label>Số vạch để thắng (3 - 10):</label>
                 <input type="number" id="winScoreInput" min="3" max="10" value="3">
+                <label class="host-role-label">Vai trò khi tạo giải:</label>
+                <div class="host-role-options">
+                    <label class="host-role-option">
+                        <input type="radio" name="hostRole" value="organize" checked>
+                        <span>Ban tổ chức only — không tham gia đấu</span>
+                    </label>
+                    <label class="host-role-option">
+                        <input type="radio" name="hostRole" value="compete">
+                        <span>Vừa tổ chức vừa thi đấu</span>
+                    </label>
+                </div>
             </div>
             <button id="createBtn">Tạo Giải Đấu Mới</button>
             <hr style="margin: 25px 0;">
@@ -112,7 +123,7 @@
                 <input type="text" id="inviteLink" readonly>
                 <button id="copyInviteBtn">🔗 Sao chép link mời</button>
             </div>
-            <div class="settings-box"><label>Tuyển thủ tham gia:</label><ul id="playerList"></ul></div>
+            <div class="settings-box"><label>Thành viên trong phòng:</label><ul id="playerList"></ul></div>
             <button id="startTournamentBtn" style="display: none; margin-bottom: 10px;">Bắt Đầu Bốc Thăm & Đấu</button>
             <button id="leaveRoomBtn" style="background: #7f8c8d; display: block; margin: 0 auto;">⬅ Hủy & Rời Phòng</button>
             <p id="waitStatus" style="margin-top: 15px;">Đang chờ chủ phòng bắt đầu...</p>

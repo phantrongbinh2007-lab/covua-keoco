@@ -45,6 +45,7 @@ let myShortId = null;
 let nameLocked = false;
 let currentMatchId = null;
 let moveSubmitPending = false;
+let iAmCompeting = true; // false = ban tổ chức only
 
 let myToken = localStorage.getItem('chessTugToken');
 if (!myToken) {
@@ -97,6 +98,7 @@ function applyJoinedRoom(data) {
     clearPendingCreate();
     myRoomCode = data.roomCode;
     sessionStorage.setItem('currentRoomCode', myRoomCode);
+    iAmCompeting = data.compete !== false;
     $('#lobbyMsg').text('');
     $('#lobby').hide();
     $('#bracketArea').hide();
@@ -107,12 +109,17 @@ function applyJoinedRoom(data) {
     $('#startTournamentBtn').prop('disabled', true);
     if (data.isHost) {
         $('#startTournamentBtn').show().text('Bắt Đầu Bốc Thăm & Đấu');
-        $('#waitStatus').text('Bạn là chủ giải — chia sẻ mã phòng cho tối đa 64 người!');
+        if (iAmCompeting) {
+            $('#waitStatus').text('Bạn là chủ giải (cũng thi đấu) — chia sẻ mã phòng cho học viên!');
+        } else {
+            $('#waitStatus').text('Bạn là ban tổ chức — không vào bảng đấu. Chia sẻ mã / bắt đầu khi đủ kỳ thủ!');
+        }
     } else {
         $('#startTournamentBtn').hide();
         $('#waitStatus').text('Đang chờ chủ phòng bắt đầu...');
     }
-    $('#waitPlayerCount').text(`${data.playerCount || 1}/${data.maxPlayers || MAX_PLAYERS} người`);
+    const count = data.competitorCount != null ? data.competitorCount : (data.playerCount || 0);
+    $('#waitPlayerCount').text(`${count}/${data.maxPlayers || MAX_PLAYERS} kỳ thủ`);
 }
 
 function clearPendingJoin() {
@@ -222,28 +229,38 @@ function doCreateRoom() {
 function renderWaitingRoom(data) {
     const players = Array.isArray(data) ? data : (data.players || []);
     const maxPlayers = data.maxPlayers || MAX_PLAYERS;
-    $('#waitPlayerCount').text(`${players.length}/${maxPlayers} người`);
+    const competitorCount = data.competitorCount != null
+        ? data.competitorCount
+        : players.filter(p => p.compete !== false).length;
+    $('#waitPlayerCount').text(`${competitorCount}/${maxPlayers} kỳ thủ`);
     $('#playerList').empty();
     players.forEach(p => {
         const sid = p.shortId || shortIdFromToken(p.token);
+        const isOrg = p.compete === false;
+        const tag = isOrg
+            ? '<span class="player-role-tag organizer">Ban tổ chức</span>'
+            : '<span class="player-role-tag fighter">Thi đấu</span>';
+        const icon = isOrg ? '🧑‍💼' : '👦';
         $('#playerList').append(
-            `<li>👦 ${escapeHtml(p.name)}<span class="player-short-id">#${escapeHtml(sid)}</span></li>`
+            `<li>${icon} ${escapeHtml(p.name)}<span class="player-short-id">#${escapeHtml(sid)}</span>${tag}</li>`
         );
     });
 
     const isHost = $('#startTournamentBtn').is(':visible');
     if (isHost) {
-        const canStart = players.length >= 2;
+        const canStart = competitorCount >= 2;
         $('#startTournamentBtn').prop('disabled', !canStart);
         if (!canStart) {
-            $('#waitStatus').text('Cần ít nhất 2 người để bắt đầu giải.');
-        } else if (players.length >= maxPlayers) {
-            $('#waitStatus').text('Đủ người! Bạn có thể bắt đầu giải đấu.');
+            $('#waitStatus').text('Cần ít nhất 2 kỳ thủ thi đấu (không tính ban tổ chức).');
+        } else if (competitorCount >= maxPlayers) {
+            $('#waitStatus').text('Đủ kỳ thủ! Bạn có thể bắt đầu giải đấu.');
+        } else if (!iAmCompeting) {
+            $('#waitStatus').text(`Đã có ${competitorCount} kỳ thủ — bạn là ban tổ chức. Bấm Bắt đầu khi sẵn sàng!`);
         } else {
-            $('#waitStatus').text(`Đã có ${players.length} người — tối đa ${maxPlayers}. Bấm Bắt đầu khi sẵn sàng!`);
+            $('#waitStatus').text(`Đã có ${competitorCount} kỳ thủ — tối đa ${maxPlayers}. Bấm Bắt đầu khi sẵn sàng!`);
         }
-    } else if (players.length >= maxPlayers) {
-        $('#waitStatus').text('Phòng đã đủ người! Đang chờ chủ phòng bắt đầu...');
+    } else if (competitorCount >= maxPlayers) {
+        $('#waitStatus').text('Phòng đã đủ kỳ thủ! Đang chờ chủ phòng bắt đầu...');
     }
 }
 
@@ -422,12 +439,19 @@ $(document).ready(function() {
         const selectedLevel = $('#levelSelect').val();
         let winScore = parseInt($('#winScoreInput').val());
         if (isNaN(winScore) || winScore < 3) winScore = 3;
+        const compete = $('input[name="hostRole"]:checked').val() !== 'organize';
 
         whenSocketReady(() => {
             autoReconnectCancelled = true;
             sessionStorage.removeItem('currentRoomCode');
             myRoomCode = null;
-            attemptCreateRoom({ playerName: name, level: selectedLevel, winScore: winScore, token: myToken });
+            attemptCreateRoom({
+                playerName: name,
+                level: selectedLevel,
+                winScore: winScore,
+                token: myToken,
+                compete
+            });
         });
     });
 
