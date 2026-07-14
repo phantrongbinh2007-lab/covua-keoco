@@ -2,6 +2,7 @@ const express = require('express');
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { Server } = require('socket.io');
 const { init: initFirebase, dbGet, dbSet, dbRemove, isUsingAdmin } = require('./firebaseDb');
 
@@ -14,15 +15,23 @@ app.use(express.static('public'));
 initFirebase();
 
 const rooms = {};
+const playerRegistry = {};
 const MAX_PLAYERS = 64;
 const WAITING_DISCONNECT_GRACE_MS = 60 * 1000;
+const PLAYING_DISCONNECT_GRACE_MS = 45 * 1000;
 const TOURNAMENT_START_COUNTDOWN = 10;
 const ROUND_START_COUNTDOWN = 5;
 const REGULAR_PUZZLE_TIME_MS = 60 * 1000;
 const SUDDEN_DEATH_TIME_MS = 30 * 1000;
 const MAX_REGULAR_DRAWS = 3;
+const MAX_NAME_LENGTH = 15;
 
-let leaderboard = { daily: {}, weekly: {}, monthly: {} };
+let leaderboard = {
+    daily: {},
+    weekly: {},
+    monthly: {},
+    periods: { daily: null, weekly: null, monthly: null }
+};
 const puzzleCache = {};
 
 function loadPuzzleCache() {
@@ -53,30 +62,275 @@ app.get('/api/health', (req, res) => {
     });
 });
 
+app.get('/api/matches/:id', async (req, res) => {
+    try {
+        const log = await dbGet(`matchLogs/${req.params.id}`);
+        if (!log) return res.status(404).json({ error: 'Không tìm thấy nhật ký trận.' });
+        res.json(log);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/player/:token', (req, res) => {
+    const profile = playerRegistry[req.params.token];
+    if (!profile) return res.status(404).json({ error: 'Chưa đăng ký' });
+    res.json({
+        name: profile.name,
+        shortId: shortPlayerId(req.params.token),
+        locked: true
+    });
+});
+
 dbGet('leaderboard').then((data) => {
     if (data) {
-        leaderboard = data;
+        leaderboard = normalizeLeaderboard(data);
         console.log('☁️ Đã tải Bảng Xếp Hạng từ Firebase!');
-    } else {
-        dbSet('leaderboard', leaderboard);
     }
+    ensureLeaderboardPeriods(true);
 }).catch((error) => { console.error('❌ Lỗi Firebase leaderboard:', error.message); });
 
-function saveLeaderboard() {
-    dbSet('leaderboard', leaderboard).catch(console.error);
-    io.emit('updateLeaderboard', leaderboard);
+dbGet('players').then((data) => {
+    if (data && typeof data === 'object') {
+        Object.assign(playerRegistry, data);
+        console.log(`☁️ Đã tải ${Object.keys(playerRegistry).length} hồ sơ kỳ thủ`);
+    }
+}).catch((error) => { console.error('❌ Lỗi Firebase players:', error.message); });
+
+setInterval(() => ensureLeaderboardPeriods(), 60 * 1000);
+
+function getPeriodKeys(date = new Date()) {
+    const vn = new Date(date.getTime() + 7 * 60 * 60 * 1000);
+    const y = vn.getUTCFullYear();
+    const m = String(vn.getUTCMonth() + 1).padStart(2, '0');
+    const d = String(vn.getUTCDate()).padStart(2, '0');
+    const daily = `${y}-${m}-${d}`;
+    const monthly = `${y}-${m}`;
+
+    const tmp = new Date(Date.UTC(y, vn.getUTCMonth(), vn.getUTCDate()));
+    const dayNum = tmp.getUTCDay() || 7;
+    tmp.setUTCDate(tmp.getUTCDate() + 4 - dayNum);
+    const weekYear = tmp.getUTCFullYear();
+    const yearStart = new Date(Date.UTC(weekYear, 0, 1));
+    const week = Math.ceil((((tmp - yearStart) / 86400000) + 1) / 7);
+    const weekly = `${weekYear}-W${String(week).padStart(2, '0')}`;
+    return { daily, weekly, monthly };
 }
 
-function addScore(playerName, points) {
-    if (!leaderboard) leaderboard = { daily: {}, weekly: {}, monthly: {} };
+function normalizeLeaderboard(data) {
+    return {
+        daily: data.daily || {},
+        weekly: data.weekly || {},
+        monthly: data.monthly || {},
+        periods: {
+            daily: (data.periods && data.periods.daily) || null,
+            weekly: (data.periods && data.periods.weekly) || null,
+            monthly: (data.periods && data.periods.monthly) || null
+        }
+    };
+}
+
+function publicLeaderboard() {
+    ensureLeaderboardPeriods();
+    return {
+        daily: leaderboard.daily,
+        weekly: leaderboard.weekly,
+        monthly: leaderboard.monthly,
+        periods: { ...leaderboard.periods }
+    };
+}
+
+function ensureLeaderboardPeriods(forceSave = false) {
+    if (!leaderboard.periods) leaderboard.periods = { daily: null, weekly: null, monthly: null };
     if (!leaderboard.daily) leaderboard.daily = {};
     if (!leaderboard.weekly) leaderboard.weekly = {};
     if (!leaderboard.monthly) leaderboard.monthly = {};
 
+    const keys = getPeriodKeys();
+    let changed = false;
+
+    if (leaderboard.periods.daily !== keys.daily) {
+        leaderboard.daily = {};
+        leaderboard.periods.daily = keys.daily;
+        changed = true;
+        console.log(`🔄 Reset BXH ngày → ${keys.daily}`);
+    }
+    if (leaderboard.periods.weekly !== keys.weekly) {
+        leaderboard.weekly = {};
+        leaderboard.periods.weekly = keys.weekly;
+        changed = true;
+        console.log(`🔄 Reset BXH tuần → ${keys.weekly}`);
+    }
+    if (leaderboard.periods.monthly !== keys.monthly) {
+        leaderboard.monthly = {};
+        leaderboard.periods.monthly = keys.monthly;
+        changed = true;
+        console.log(`🔄 Reset BXH tháng → ${keys.monthly}`);
+    }
+
+    if (changed || forceSave) saveLeaderboard();
+    return changed;
+}
+
+function saveLeaderboard() {
+    dbSet('leaderboard', leaderboard).catch(console.error);
+    io.emit('updateLeaderboard', publicLeaderboard());
+}
+
+function addScore(playerName, points) {
+    ensureLeaderboardPeriods();
     leaderboard.daily[playerName] = (leaderboard.daily[playerName] || 0) + points;
     leaderboard.weekly[playerName] = (leaderboard.weekly[playerName] || 0) + points;
     leaderboard.monthly[playerName] = (leaderboard.monthly[playerName] || 0) + points;
     saveLeaderboard();
+}
+
+function shortPlayerId(token) {
+    if (!token) return '------';
+    return String(token).slice(0, 6).toLowerCase();
+}
+
+function sanitizePlayerName(raw) {
+    return String(raw || '').trim().slice(0, MAX_NAME_LENGTH);
+}
+
+function savePlayerRegistry(token) {
+    if (!token || !playerRegistry[token]) return;
+    dbSet(`players/${token}`, playerRegistry[token]).catch(console.error);
+}
+
+function resolvePlayerIdentity(token, requestedName) {
+    const name = sanitizePlayerName(requestedName);
+    if (!token) return { ok: false, error: 'Thiếu mã định danh kỳ thủ.' };
+    if (!name) return { ok: false, error: 'Vui lòng nhập tên của bạn!' };
+
+    const existing = playerRegistry[token];
+    if (existing && existing.name) {
+        return {
+            ok: true,
+            name: existing.name,
+            shortId: shortPlayerId(token),
+            nameLocked: true,
+            renamed: existing.name !== name
+        };
+    }
+
+    const takenByOther = Object.entries(playerRegistry).some(
+        ([t, p]) => t !== token && p.name && p.name.trim().toLowerCase() === name.toLowerCase()
+    );
+    if (takenByOther) {
+        return { ok: false, error: 'Tên này đã được đăng ký bởi kỳ thủ khác. Hãy chọn tên khác!' };
+    }
+
+    playerRegistry[token] = {
+        name,
+        createdAt: Date.now(),
+        lastSeenAt: Date.now()
+    };
+    savePlayerRegistry(token);
+    return { ok: true, name, shortId: shortPlayerId(token), nameLocked: true, renamed: false };
+}
+
+function touchPlayer(token) {
+    if (!token || !playerRegistry[token]) return;
+    playerRegistry[token].lastSeenAt = Date.now();
+    savePlayerRegistry(token);
+}
+
+function getPuzzleForMatch(room, match) {
+    const list = puzzleCache[Number(room.level)];
+    if (!list || !list.length || match.currentSeed == null) return null;
+    return list[match.currentSeed % list.length];
+}
+
+function normalizeMoveUci(move) {
+    return String(move || '').toLowerCase();
+}
+
+function isMoveAllowed(expected, actual) {
+    const options = Array.isArray(expected) ? expected : [expected];
+    const actualNorm = normalizeMoveUci(actual);
+    return options.some(o => normalizeMoveUci(o) === actualNorm);
+}
+
+function countPlayerMovesInSolution(solution) {
+    if (!Array.isArray(solution)) return 0;
+    let count = 0;
+    for (let i = 1; i < solution.length; i += 2) count++;
+    return count;
+}
+
+function getExpectedPlayerMove(puzzle, playerMoveIndex) {
+    const solutionIndex = playerMoveIndex * 2 + 1;
+    if (!puzzle || !puzzle.solution || solutionIndex >= puzzle.solution.length) return null;
+    return puzzle.solution[solutionIndex];
+}
+
+function initMatchProgress(match) {
+    match.progress = {};
+    if (match.p1?.token) match.progress[match.p1.token] = [];
+    if (match.p2?.token) match.progress[match.p2.token] = [];
+}
+
+function initMatchLog(match, room) {
+    match.log = {
+        matchId: match.id,
+        roomCode: room.roomCode,
+        level: room.level,
+        winScore: room.winScore,
+        p1: match.p1 ? { token: match.p1.token, name: match.p1.name, shortId: shortPlayerId(match.p1.token) } : null,
+        p2: match.p2 ? { token: match.p2.token, name: match.p2.name, shortId: shortPlayerId(match.p2.token) } : null,
+        startedAt: Date.now(),
+        endedAt: null,
+        winner: null,
+        reason: null,
+        puzzles: [],
+        events: []
+    };
+}
+
+function appendMatchEvent(match, event) {
+    if (!match.log) return;
+    match.log.events.push({ t: Date.now(), ...event });
+}
+
+function startPuzzleLog(match) {
+    if (!match.log) return;
+    match.log.puzzles.push({
+        seed: match.currentSeed,
+        round: match.puzzleRound,
+        mode: match.roundMode || 'regular',
+        startedAt: Date.now(),
+        endedAt: null,
+        solvedBy: null,
+        moves: {},
+        outcome: null
+    });
+}
+
+function currentPuzzleLog(match) {
+    if (!match.log || !match.log.puzzles.length) return null;
+    return match.log.puzzles[match.log.puzzles.length - 1];
+}
+
+function finishPuzzleLog(match, outcome, solvedByToken) {
+    const entry = currentPuzzleLog(match);
+    if (!entry) return;
+    entry.endedAt = Date.now();
+    entry.outcome = outcome;
+    entry.solvedBy = solvedByToken || null;
+    if (match.progress) {
+        entry.moves = { ...match.progress };
+    }
+}
+
+async function persistMatchLog(match) {
+    if (!match?.log) return;
+    try {
+        await dbSet(`matchLogs/${match.id}`, match.log);
+    } catch (err) {
+        console.error(`❌ Lưu match log [${match.id}]:`, err.message);
+    }
 }
 
 function normalizeRoomCode(code) {
@@ -112,7 +366,9 @@ function makeMatchId() {
 function makeMatch(p1, p2) {
     return {
         id: makeMatchId(), p1, p2, winner: null, ropePosition: 0,
-        puzzleRound: 1, currentSeed: null, isBye: false
+        scoreP1: 0, scoreP2: 0,
+        puzzleRound: 1, currentSeed: null, isBye: false,
+        progress: {}, log: null
     };
 }
 
@@ -353,7 +609,9 @@ function decideDoubleLoss(match) {
 }
 
 function sanitizePlayers(players) {
-    return players.map(({ id, token, name }) => ({ id, token, name }));
+    return players.map(({ id, token, name }) => ({
+        id, token, name, shortId: shortPlayerId(token)
+    }));
 }
 
 function emitWaitingRoomUpdate(roomCode, room) {
@@ -401,6 +659,55 @@ function scheduleWaitingRoomDisconnect(roomCode, room, player, socketId) {
     }, WAITING_DISCONNECT_GRACE_MS);
 }
 
+function findActiveMatchForPlayer(room, token) {
+    return room.currentRoundMatches.find(m =>
+        !m.winner && !m.isBye && (m.p1?.token === token || m.p2?.token === token)
+    ) || null;
+}
+
+function schedulePlayingDisconnectForfeit(roomCode, room, player, socketId) {
+    clearPlayerDisconnectTimer(player);
+    const token = player.token;
+    const playerName = player.name;
+    const match = findActiveMatchForPlayer(room, token);
+
+    if (match) {
+        const opponent = match.p1.token === token ? match.p2 : match.p1;
+        if (opponent?.token) {
+            emitToToken(opponent.token, 'opponentDisconnected', {
+                name: playerName,
+                graceMs: PLAYING_DISCONNECT_GRACE_MS
+            });
+        }
+        appendMatchEvent(match, { type: 'disconnect', token, name: playerName });
+    }
+
+    player.disconnectTimer = setTimeout(() => {
+        if (!rooms[roomCode] || room.status !== 'playing') return;
+        const p = room.players.find(x => x.token === token);
+        if (!p || p.id !== socketId) return;
+
+        const activeMatch = findActiveMatchForPlayer(room, token);
+        if (!activeMatch || !activeMatch.p1 || !activeMatch.p2) return;
+
+        const winner = activeMatch.p1.token === token ? activeMatch.p2 : activeMatch.p1;
+        finishPuzzleLog(activeMatch, 'forfeit_disconnect', null);
+        appendMatchEvent(activeMatch, {
+            type: 'forfeit',
+            token,
+            name: playerName,
+            reason: 'disconnect_timeout'
+        });
+        resolveMatchWinner(
+            room,
+            roomCode,
+            activeMatch,
+            winner,
+            `${playerName} mất kết nối quá lâu — đối thủ thắng.`
+        );
+    }, PLAYING_DISCONNECT_GRACE_MS);
+}
+
 async function finishTournament(room, roomCode, championName) {
     const results = buildTournamentResults(room, championName);
     await saveTournamentResults(results);
@@ -446,11 +753,27 @@ function resolveMatchWinner(room, roomCode, match, winner, reasonMessage) {
 
     if (!winner.isDoubleLoss) addScore(winner.name, 2);
 
+    if (match.log) {
+        match.log.endedAt = Date.now();
+        match.log.winner = winner.isDoubleLoss
+            ? { name: winner.name, isDoubleLoss: true }
+            : { token: winner.token, name: winner.name, shortId: shortPlayerId(winner.token) };
+        match.log.reason = reasonMessage;
+        appendMatchEvent(match, {
+            type: 'match_end',
+            winner: match.log.winner,
+            reason: reasonMessage
+        });
+        persistMatchLog(match);
+    }
+
     const payload = {
         winner: winner.name,
         bracket: buildBracketPayload(room),
         reason: reasonMessage,
-        isDoubleLoss: !!winner.isDoubleLoss
+        isDoubleLoss: !!winner.isDoubleLoss,
+        matchId: match.id,
+        hasReplay: !!match.log
     };
     if (match.p1?.token) emitToToken(match.p1.token, 'matchResult', payload);
     if (match.p2?.token) emitToToken(match.p2.token, 'matchResult', payload);
@@ -463,12 +786,14 @@ function handlePuzzleTimeout(roomCode, match) {
     if (!room || match.winner) return;
 
     if (match.roundMode === 'sudden_death') {
+        finishPuzzleLog(match, 'timeout_double_loss', null);
         decideDoubleLoss(match);
         resolveMatchWinner(room, roomCode, match, match.winner, 'Hết giờ Sudden Death: đồng thua.');
         return;
     }
 
     match.drawStreak = (match.drawStreak || 0) + 1;
+    finishPuzzleLog(match, 'timeout_draw', null);
     match.puzzleRound += 1;
 
     if (match.drawStreak >= MAX_REGULAR_DRAWS) {
@@ -495,10 +820,18 @@ function assignNextPuzzle(match, roomCode, options = {}) {
 
     match.roundMode = mode;
     match.timeLimitMs = timeLimitMs;
-    match.currentSeed = Math.floor(Math.random() * 1000000);
+    match.currentSeed = crypto.randomInt(0, 1000000);
     match.deadlineAt = Date.now() + timeLimitMs;
     match.hadMoveP1 = false;
     match.hadMoveP2 = false;
+    initMatchProgress(match);
+    startPuzzleLog(match);
+    appendMatchEvent(match, {
+        type: 'puzzle_start',
+        seed: match.currentSeed,
+        round: match.puzzleRound,
+        mode
+    });
 
     match.timerId = setTimeout(() => {
         handlePuzzleTimeout(roomCode, match);
@@ -509,17 +842,86 @@ function assignNextPuzzle(match, roomCode, options = {}) {
     if (!options.silent) {
         const payload = {
             ropePosition: match.ropePosition,
+            scoreP1: match.scoreP1 || 0,
+            scoreP2: match.scoreP2 || 0,
+            winScore: room.winScore,
             puzzleSeed: match.currentSeed,
             puzzleRound: match.puzzleRound,
             roundMode: match.roundMode,
             timeLimitMs: match.timeLimitMs,
-            deadlineAt: match.deadlineAt
+            deadlineAt: match.deadlineAt,
+            lastScorer: options.lastScorer || null,
+            scoredSide: options.scoredSide || null
         };
         if (options.message) payload.message = options.message;
         const event = options.payloadType || 'update_game';
         if (match.p1?.token) emitToToken(match.p1.token, event, payload);
         if (match.p2?.token) emitToToken(match.p2.token, event, payload);
         io.to('watch_' + match.id).emit(event, payload);
+    }
+}
+
+function applySolvedPuzzle(room, roomCode, match, token) {
+    clearMatchTimer(match);
+    if (token === match.p1.token) match.hadMoveP1 = true;
+    else if (token === match.p2.token) match.hadMoveP2 = true;
+
+    finishPuzzleLog(match, 'solved', token);
+    appendMatchEvent(match, { type: 'solved', token, puzzleRound: match.puzzleRound });
+    match.puzzleRound++;
+
+    if (match.roundMode === 'sudden_death') {
+        match.drawStreak = 0;
+        const winner = token === match.p1.token ? match.p1 : match.p2;
+        resolveMatchWinner(room, roomCode, match, winner, 'Sudden Death: giải đúng trước và chiến thắng!');
+        return;
+    }
+
+    const scoredSide = token === match.p1.token ? 'p1' : 'p2';
+    if (scoredSide === 'p1') {
+        match.scoreP1 = (match.scoreP1 || 0) + 1;
+        match.ropePosition -= 1;
+    } else {
+        match.scoreP2 = (match.scoreP2 || 0) + 1;
+        match.ropePosition += 1;
+    }
+
+    let matchOver = false;
+    if (match.ropePosition <= -room.winScore) { match.winner = match.p1; matchOver = true; }
+    else if (match.ropePosition >= room.winScore) { match.winner = match.p2; matchOver = true; }
+
+    if (matchOver) {
+        match.drawStreak = 0;
+        if (match.p1?.token) {
+            emitToToken(match.p1.token, 'scoreUpdate', {
+                scoreP1: match.scoreP1, scoreP2: match.scoreP2,
+                ropePosition: match.ropePosition, winScore: room.winScore,
+                lastScorer: token, scoredSide
+            });
+        }
+        if (match.p2?.token) {
+            emitToToken(match.p2.token, 'scoreUpdate', {
+                scoreP1: match.scoreP1, scoreP2: match.scoreP2,
+                ropePosition: match.ropePosition, winScore: room.winScore,
+                lastScorer: token, scoredSide
+            });
+        }
+        io.to('watch_' + match.id).emit('scoreUpdate', {
+            scoreP1: match.scoreP1, scoreP2: match.scoreP2,
+            ropePosition: match.ropePosition, winScore: room.winScore,
+            lastScorer: token, scoredSide
+        });
+        resolveMatchWinner(room, roomCode, match, match.winner, 'Đã đạt mốc kéo dây.');
+    } else {
+        match.drawStreak = 0;
+        assignNextPuzzle(match, roomCode, {
+            mode: 'regular',
+            lastScorer: token,
+            scoredSide,
+            message: scoredSide === 'p1'
+                ? `${match.p1.name} giải xong! Dây lệch về phía họ.`
+                : `${match.p2.name} giải xong! Dây lệch về phía họ.`
+        });
     }
 }
 
@@ -542,12 +944,17 @@ function launchRoundMatches(room, roomCode) {
             match.drawStreak = 0;
             match.puzzleRound = 1;
             match.ropePosition = 0;
+            match.scoreP1 = 0;
+            match.scoreP2 = 0;
+            initMatchLog(match, room);
             assignNextPuzzle(match, roomCode, { silent: true });
             const base = {
                 level: room.level, winScore: room.winScore,
-                ropePosition: 0, puzzleRound: match.puzzleRound,
+                ropePosition: 0, scoreP1: 0, scoreP2: 0,
+                puzzleRound: match.puzzleRound,
                 puzzleSeed: match.currentSeed, roundMode: match.roundMode,
-                timeLimitMs: match.timeLimitMs, deadlineAt: match.deadlineAt
+                timeLimitMs: match.timeLimitMs, deadlineAt: match.deadlineAt,
+                matchId: match.id
             };
             emitToToken(match.p1.token, 'gameStart', { ...base, isP1: true, opponentName: match.p2.name });
             emitToToken(match.p2.token, 'gameStart', { ...base, isP1: false, opponentName: match.p1.name });
@@ -569,7 +976,24 @@ function startNewRound(room, roomCode) {
 }
 
 io.on('connection', (socket) => {
-    socket.emit('updateLeaderboard', leaderboard);
+    socket.emit('updateLeaderboard', publicLeaderboard());
+
+    socket.on('getPlayerProfile', (data, callback) => {
+        const ack = typeof callback === 'function' ? callback : () => {};
+        const token = data && data.token;
+        const profile = token ? playerRegistry[token] : null;
+        if (!profile) {
+            ack({ ok: true, registered: false, shortId: shortPlayerId(token) });
+            return;
+        }
+        ack({
+            ok: true,
+            registered: true,
+            name: profile.name,
+            shortId: shortPlayerId(token),
+            nameLocked: true
+        });
+    });
 
     socket.on('reconnectUser', async (data) => {
         const roomCode = normalizeRoomCode(data.roomCode);
@@ -591,25 +1015,43 @@ io.on('connection', (socket) => {
 
         clearPlayerDisconnectTimer(player);
         player.id = socket.id;
+        touchPlayer(data.token);
         joinPlayerChannels(socket, data.token, roomCode);
+
+        if (room.status === 'playing') {
+            const match = findActiveMatchForPlayer(room, data.token);
+            if (match) {
+                const opponent = match.p1.token === data.token ? match.p2 : match.p1;
+                if (opponent?.token) {
+                    emitToToken(opponent.token, 'opponentReconnected', { name: player.name });
+                }
+                appendMatchEvent(match, { type: 'reconnect', token: data.token, name: player.name });
+            }
+        }
 
         if (room.status === 'waiting' || room.status === 'countdown') {
             socket.emit('roomCreated', {
                 roomCode, isHost: room.hostToken === data.token,
-                maxPlayers: MAX_PLAYERS, playerCount: room.players.length
+                maxPlayers: MAX_PLAYERS, playerCount: room.players.length,
+                shortId: shortPlayerId(data.token), playerName: player.name
             });
             emitWaitingRoomUpdate(roomCode, room);
         } else if (room.status === 'playing') {
             let match = room.currentRoundMatches.find(m => m.p1?.token === data.token || m.p2?.token === data.token);
             if (match && !match.winner && !match.isBye && match.currentSeed !== null) {
                 let isP1 = match.p1.token === data.token;
+                const progress = (match.progress && match.progress[data.token]) || [];
                 socket.emit('gameStart', {
                     level: room.level, winScore: room.winScore,
-                    puzzleSeed: match.currentSeed, puzzleRound: match.puzzleRound, ropePosition: match.ropePosition,
+                    puzzleSeed: match.currentSeed, puzzleRound: match.puzzleRound,
+                    ropePosition: match.ropePosition,
+                    scoreP1: match.scoreP1 || 0, scoreP2: match.scoreP2 || 0,
                     isP1: isP1, opponentName: (isP1 ? match.p2 : match.p1)?.name || '---',
                     roundMode: match.roundMode || 'regular',
                     timeLimitMs: match.timeLimitMs || REGULAR_PUZZLE_TIME_MS,
-                    deadlineAt: match.deadlineAt || null
+                    deadlineAt: match.deadlineAt || null,
+                    matchId: match.id,
+                    acceptedMoves: progress
                 });
             } else {
                 socket.emit('showBracket', buildBracketPayload(room));
@@ -635,11 +1077,10 @@ io.on('connection', (socket) => {
 
     socket.on('createRoom', async (settings, callback) => {
         const ack = typeof callback === 'function' ? callback : () => {};
-        const playerName = (settings.playerName || '').trim();
-        if (!playerName) {
-            const err = 'Vui lòng nhập tên của bạn!';
-            socket.emit('errorMsg', err);
-            ack({ ok: false, error: err });
+        const identity = resolvePlayerIdentity(settings.token, settings.playerName);
+        if (!identity.ok) {
+            socket.emit('errorMsg', identity.error);
+            ack({ ok: false, error: identity.error });
             return;
         }
 
@@ -657,7 +1098,7 @@ io.on('connection', (socket) => {
         rooms[roomCode] = {
             roomCode,
             hostToken: settings.token,
-            players: [{ id: socket.id, token: settings.token, name: playerName }],
+            players: [{ id: socket.id, token: settings.token, name: identity.name }],
             activePlayers: [],
             bracket: [],
             currentRoundMatches: [],
@@ -668,18 +1109,20 @@ io.on('connection', (socket) => {
         };
         joinPlayerChannels(socket, settings.token, roomCode);
         await persistRoom(roomCode);
-        socket.emit('roomCreated', {
+        const roomPayload = {
             roomCode, isHost: true,
-            maxPlayers: MAX_PLAYERS, playerCount: 1
-        });
+            maxPlayers: MAX_PLAYERS, playerCount: 1,
+            shortId: identity.shortId, playerName: identity.name,
+            nameLocked: true
+        };
+        socket.emit('roomCreated', roomPayload);
         emitWaitingRoomUpdate(roomCode, rooms[roomCode]);
-        console.log(`🏠 Giải đấu [${roomCode}] được tạo bởi ${playerName}.`);
-        ack({ ok: true, roomCode, isHost: true, playerCount: 1, maxPlayers: MAX_PLAYERS });
+        console.log(`🏠 Giải đấu [${roomCode}] được tạo bởi ${identity.name} (#${identity.shortId}).`);
+        ack({ ok: true, ...roomPayload });
     });
 
     socket.on('joinRoom', async (data, callback) => {
         const roomCode = normalizeRoomCode(data.roomCode);
-        const playerName = (data.playerName || '').trim();
         const ack = typeof callback === 'function' ? callback : () => {};
 
         if (!/^\d{4}$/.test(roomCode)) {
@@ -688,10 +1131,11 @@ io.on('connection', (socket) => {
             ack({ ok: false, error: err });
             return;
         }
-        if (!playerName) {
-            const err = 'Vui lòng nhập tên của bạn!';
-            socket.emit('errorMsg', err);
-            ack({ ok: false, error: err });
+
+        const identity = resolvePlayerIdentity(data.token, data.playerName);
+        if (!identity.ok) {
+            socket.emit('errorMsg', identity.error);
+            ack({ ok: false, error: identity.error });
             return;
         }
 
@@ -717,8 +1161,8 @@ io.on('connection', (socket) => {
 
         const existingPlayer = room.players.find(p => p.token === data.token);
 
-        if (isNameTaken(room, playerName, data.token)) {
-            const err = 'Tên này đã có người khác dùng trong phòng. Hãy thêm số hoặc ký tự (vd: Minh2)!';
+        if (isNameTaken(room, identity.name, data.token)) {
+            const err = 'Tên đã đăng ký của bạn đang có người khác dùng trong phòng này. Liên hệ chủ giải.';
             socket.emit('errorMsg', err);
             ack({ ok: false, error: err });
             return;
@@ -734,20 +1178,23 @@ io.on('connection', (socket) => {
         if (existingPlayer) {
             clearPlayerDisconnectTimer(existingPlayer);
             existingPlayer.id = socket.id;
-            existingPlayer.name = playerName;
+            existingPlayer.name = identity.name;
         } else {
-            room.players.push({ id: socket.id, token: data.token, name: playerName });
+            room.players.push({ id: socket.id, token: data.token, name: identity.name });
         }
 
+        touchPlayer(data.token);
         joinPlayerChannels(socket, data.token, roomCode);
         await persistRoom(roomCode);
         const roomPayload = {
             roomCode, isHost: room.hostToken === data.token,
-            maxPlayers: MAX_PLAYERS, playerCount: room.players.length
+            maxPlayers: MAX_PLAYERS, playerCount: room.players.length,
+            shortId: identity.shortId, playerName: identity.name,
+            nameLocked: true
         };
         socket.emit('roomCreated', roomPayload);
         emitWaitingRoomUpdate(roomCode, room);
-        console.log(`✅ [${playerName}] vào phòng [${roomCode}] (${room.players.length}/${MAX_PLAYERS})`);
+        console.log(`✅ [${identity.name}#${identity.shortId}] vào phòng [${roomCode}] (${room.players.length}/${MAX_PLAYERS})`);
         ack({ ok: true, ...roomPayload });
     });
 
@@ -790,63 +1237,84 @@ io.on('connection', (socket) => {
             socket.emit('spectateStart', {
                 level: room.level, winScore: room.winScore, puzzleSeed: match.currentSeed,
                 puzzleRound: match.puzzleRound, ropePosition: match.ropePosition,
+                scoreP1: match.scoreP1 || 0, scoreP2: match.scoreP2 || 0,
                 p1Name: match.p1.name, p2Name: match.p2.name,
                 roundMode: match.roundMode || 'regular',
                 timeLimitMs: match.timeLimitMs || REGULAR_PUZZLE_TIME_MS,
-                deadlineAt: match.deadlineAt || null
+                deadlineAt: match.deadlineAt || null,
+                matchId: match.id
             });
         }
     });
 
-    socket.on('solved_puzzle', (data) => {
+    socket.on('submit_move', (data, callback) => {
+        const ack = typeof callback === 'function' ? callback : () => {};
         const rCode = normalizeRoomCode(data.roomCode);
         const room = rooms[rCode];
-        if (!room) return;
-        let match = room.currentRoundMatches.find(m => m.p1?.token === data.token || m.p2?.token === data.token);
-        if (!match || match.winner || match.puzzleRound !== data.puzzleRound) return;
-
-        clearMatchTimer(match);
-        if (data.token === match.p1.token) match.hadMoveP1 = true;
-        else if (data.token === match.p2.token) match.hadMoveP2 = true;
-        match.puzzleRound++;
-
-        if (match.roundMode === 'sudden_death') {
-            match.drawStreak = 0;
-            const winner = data.token === match.p1.token ? match.p1 : match.p2;
-            resolveMatchWinner(room, rCode, match, winner, 'Sudden Death: giải đúng trước và chiến thắng!');
+        if (!room) {
+            ack({ ok: false, error: 'Không tìm thấy phòng.' });
             return;
         }
 
-        if (data.token === match.p1.token) match.ropePosition -= 1;
-        else if (data.token === match.p2.token) match.ropePosition += 1;
-
-        let matchOver = false;
-        if (match.ropePosition <= -room.winScore) { match.winner = match.p1; matchOver = true; }
-        else if (match.ropePosition >= room.winScore) { match.winner = match.p2; matchOver = true; }
-
-        if (matchOver) {
-            match.drawStreak = 0;
-            resolveMatchWinner(room, rCode, match, match.winner, 'Đã đạt mốc kéo dây.');
-        } else {
-            match.drawStreak = 0;
-            assignNextPuzzle(match, rCode, { mode: 'regular' });
-        }
-    });
-
-    socket.on('playerMistake', (data) => {
-        const rCode = normalizeRoomCode(data.roomCode);
-        const room = rooms[rCode];
-        if (!room) return;
         const match = room.currentRoundMatches.find(m => m.p1?.token === data.token || m.p2?.token === data.token);
-        if (!match || match.winner || match.puzzleRound !== data.puzzleRound || match.roundMode !== 'sudden_death') return;
-
-        if (data.token === match.p1.token) {
-            match.hadMoveP1 = true;
-            resolveMatchWinner(room, rCode, match, match.p2, 'Sudden Death: đối thủ đi sai nước và thua ngay!');
-        } else {
-            match.hadMoveP2 = true;
-            resolveMatchWinner(room, rCode, match, match.p1, 'Sudden Death: đối thủ đi sai nước và thua ngay!');
+        if (!match || match.winner || match.isBye) {
+            ack({ ok: false, error: 'Trận không còn hiệu lực.' });
+            return;
         }
+        if (match.puzzleRound !== data.puzzleRound) {
+            ack({ ok: false, error: 'Puzzle đã đổi — đồng bộ lại.' });
+            return;
+        }
+
+        const puzzle = getPuzzleForMatch(room, match);
+        if (!puzzle) {
+            ack({ ok: false, error: 'Không tải được puzzle trên server.' });
+            return;
+        }
+
+        if (!match.progress) initMatchProgress(match);
+        if (!match.progress[data.token]) match.progress[data.token] = [];
+
+        const playerMoves = match.progress[data.token];
+        const expected = getExpectedPlayerMove(puzzle, playerMoves.length);
+        if (expected == null) {
+            ack({ ok: false, error: 'Đã hết nước cần giải.' });
+            return;
+        }
+
+        const move = normalizeMoveUci(data.move);
+        appendMatchEvent(match, {
+            type: 'move_attempt',
+            token: data.token,
+            move,
+            puzzleRound: match.puzzleRound,
+            index: playerMoves.length
+        });
+
+        if (!isMoveAllowed(expected, move)) {
+            if (match.roundMode === 'sudden_death') {
+                finishPuzzleLog(match, 'mistake', data.token);
+                const winner = data.token === match.p1.token ? match.p2 : match.p1;
+                resolveMatchWinner(room, rCode, match, winner, 'Sudden Death: đối thủ đi sai nước và thua ngay!');
+                ack({ ok: false, error: 'Sai nước — thua Sudden Death.', mistake: true, matchOver: true });
+                return;
+            }
+            ack({ ok: false, error: 'Nước đi không đúng lời giải.' });
+            return;
+        }
+
+        playerMoves.push(move);
+        const totalNeeded = countPlayerMovesInSolution(puzzle.solution);
+        const solved = playerMoves.length >= totalNeeded;
+
+        if (solved) {
+            applySolvedPuzzle(room, rCode, match, data.token);
+            ack({ ok: true, solved: true });
+            return;
+        }
+
+        persistRoom(rCode);
+        ack({ ok: true, solved: false, acceptedCount: playerMoves.length });
     });
 
     socket.on('sendEmoji', (data) => {
@@ -860,12 +1328,15 @@ io.on('connection', (socket) => {
 
     socket.on('disconnect', () => {
         for (const [code, room] of Object.entries(rooms)) {
-            if (room.status !== 'waiting') continue;
             const player = room.players.find(p => p.id === socket.id);
-            if (player) {
+            if (!player) continue;
+
+            if (room.status === 'waiting') {
                 scheduleWaitingRoomDisconnect(code, room, player, socket.id);
-                break;
+            } else if (room.status === 'playing') {
+                schedulePlayingDisconnectForfeit(code, room, player, socket.id);
             }
+            break;
         }
     });
 });

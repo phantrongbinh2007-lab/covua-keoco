@@ -22,15 +22,34 @@ let currentRoundMode = 'regular';
 let puzzleDeadlineAt = null;
 let puzzleTimerInterval = null;
 
-let globalLeaderboard = { daily: {}, weekly: {}, monthly: {} };
+let globalLeaderboard = { daily: {}, weekly: {}, monthly: {}, periods: {} };
 let currentLbTab = 'daily';
 let puzzleCacheByLevel = {};
 let lastTournamentResults = null;
+let myShortId = null;
+let nameLocked = false;
+let currentMatchId = null;
+let moveSubmitPending = false;
 
 let myToken = localStorage.getItem('chessTugToken');
 if (!myToken) {
-    myToken = Math.random().toString(36).substring(2, 15);
+    myToken = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 10);
     localStorage.setItem('chessTugToken', myToken);
+}
+
+function shortIdFromToken(token) {
+    return String(token || '').slice(0, 6).toLowerCase();
+}
+
+function updatePlayerIdentityUI(profile) {
+    myShortId = (profile && profile.shortId) || shortIdFromToken(myToken);
+    $('#playerIdHint').text(`ID kỳ thủ: #${myShortId}`);
+    if (profile && profile.registered && profile.name) {
+        nameLocked = true;
+        $('#playerName').val(profile.name).prop('readonly', true);
+        $('#playerIdHint').addClass('locked').text(`ID kỳ thủ: #${myShortId} (tên đã khóa)`);
+        localStorage.setItem('chessTugName', profile.name);
+    }
 }
 
 function normalizeRoomCode(raw) {
@@ -191,7 +210,10 @@ function renderWaitingRoom(data) {
     $('#waitPlayerCount').text(`${players.length}/${maxPlayers} người`);
     $('#playerList').empty();
     players.forEach(p => {
-        $('#playerList').append(`<li>👦 ${escapeHtml(p.name)}</li>`);
+        const sid = p.shortId || shortIdFromToken(p.token);
+        $('#playerList').append(
+            `<li>👦 ${escapeHtml(p.name)}<span class="player-short-id">#${escapeHtml(sid)}</span></li>`
+        );
     });
 
     const isHost = $('#startTournamentBtn').is(':visible');
@@ -244,8 +266,11 @@ function startPuzzleTimer(deadlineAt, timeLimitMs) {
     const render = () => {
         const remainingMs = Math.max(0, puzzleDeadlineAt - Date.now());
         const seconds = Math.ceil(remainingMs / 1000);
-        const modeLabel = currentRoundMode === 'sudden_death' ? '⚡ SD' : '⏱️';
-        $('#puzzleTimer').text(`${modeLabel} ${seconds}s`);
+        const $timer = $('#puzzleTimer');
+        $('#timerSeconds').text(seconds);
+        $timer.toggleClass('sudden', currentRoundMode === 'sudden_death');
+        $timer.toggleClass('urgent', seconds <= 10 && currentRoundMode !== 'sudden_death');
+        $('.timer-icon').text(currentRoundMode === 'sudden_death' ? '⚡' : '⏱️');
         if (remainingMs <= 0) stopPuzzleTimer();
     };
 
@@ -291,6 +316,13 @@ function renderTournamentResults(data) {
 $(document).ready(function() {
     const savedName = (localStorage.getItem('chessTugName') || '').trim();
     if (savedName) $('#playerName').val(savedName);
+    $('#playerIdHint').text(`ID kỳ thủ: #${shortIdFromToken(myToken)}`);
+
+    whenSocketReady(() => {
+        socket.emit('getPlayerProfile', { token: myToken }, (res) => {
+            if (res && res.ok) updatePlayerIdentityUI(res);
+        });
+    });
 
     const inviteRoom = normalizeRoomCode(new URLSearchParams(location.search).get('room'));
     const savedRoom = normalizeRoomCode(sessionStorage.getItem('currentRoomCode'));
@@ -306,7 +338,6 @@ $(document).ready(function() {
         }
         if (inviteRoom.length === 4) {
             $('#roomCode').val(inviteRoom);
-            // Dọn URL để tránh tự vào lại khi tải lại trang
             history.replaceState({}, '', location.pathname);
             if (savedName) {
                 $('#lobbyMsg').text(`Bạn được mời vào giải ${inviteRoom}. Đang vào...`);
@@ -330,6 +361,7 @@ $(document).ready(function() {
         renderLeaderboard();
     });
     $('#closeLbBtn').on('click', () => { $('#leaderboardModal').hide(); });
+    $('#closeReplayBtn').on('click', () => { $('#replayModal').hide(); });
     $('.lb-tab').on('click', function() {
         $('.lb-tab').removeClass('active');
         $(this).addClass('active');
@@ -458,6 +490,11 @@ $(document).ready(function() {
         socket.emit('watchMatch', { roomCode: myRoomCode, matchId: matchId });
     });
 
+    $('#bracketContent').on('click', '.replay-btn', function() {
+        const matchId = $(this).attr('data-match');
+        openReplay(matchId);
+    });
+
     $('#bracketContent').on('click', '.bracket-toggle', function() {
         const $round = $(this).closest('.bracket-round-collapsed');
         const $details = $round.find('.round-details');
@@ -515,10 +552,17 @@ socket.on('reconnectFailed', () => {
 });
 
 socket.on('roomCreated', (data) => {
+    if (data.playerName) {
+        updatePlayerIdentityUI({
+            registered: true,
+            name: data.playerName,
+            shortId: data.shortId || shortIdFromToken(myToken)
+        });
+    }
     applyJoinedRoom(data);
 });
 socket.on('updateLeaderboard', (data) => {
-    globalLeaderboard = data || { daily: {}, weekly: {}, monthly: {} };
+    globalLeaderboard = data || { daily: {}, weekly: {}, monthly: {}, periods: {} };
     if ($('#leaderboardModal').is(':visible')) renderLeaderboard();
 });
 
@@ -537,17 +581,25 @@ socket.on('errorMsg', (msg) => {
 });
 
 function renderLeaderboard() {
-    if (!globalLeaderboard) globalLeaderboard = { daily: {}, weekly: {}, monthly: {} };
+    if (!globalLeaderboard) globalLeaderboard = { daily: {}, weekly: {}, monthly: {}, periods: {} };
+    const periods = globalLeaderboard.periods || {};
+    const periodLabel = {
+        daily: periods.daily ? `Kỳ: ${periods.daily}` : 'Reset mỗi ngày (GMT+7)',
+        weekly: periods.weekly ? `Kỳ: ${periods.weekly}` : 'Reset mỗi tuần (GMT+7)',
+        monthly: periods.monthly ? `Kỳ: ${periods.monthly}` : 'Reset mỗi tháng (GMT+7)'
+    };
+    $('#lbPeriodHint').text(periodLabel[currentLbTab] || '');
+
     let dataObj = globalLeaderboard[currentLbTab] || {};
     let sortedArr = Object.keys(dataObj).map(name => ({ name: name, score: dataObj[name] })).sort((a, b) => b.score - a.score);
 
     let html = '';
     if (sortedArr.length === 0) {
-        html = '<tr><td colspan="3" style="text-align:center;">Chưa có dữ liệu thi đấu</td></tr>';
+        html = '<tr><td colspan="3" style="text-align:center;">Chưa có dữ liệu thi đấu kỳ này</td></tr>';
     } else {
         sortedArr.forEach((player, index) => {
             let medal = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : `#${index + 1}`;
-            html += `<tr><td>${medal}</td><td>${player.name}</td><td><strong>${player.score}</strong></td></tr>`;
+            html += `<tr><td>${medal}</td><td>${escapeHtml(player.name)}</td><td><strong>${player.score}</strong></td></tr>`;
         });
     }
     $('#lbTable tbody').html(html);
@@ -601,7 +653,8 @@ function renderMatchHtml(m) {
         return `<div class="match-bye"><div class="match-player">${p1Name}</div><div class="match-vs">(Đặc cách)</div>${winnerText}</div>`;
     }
     let watchBtnHtml = (!m.winner && !m.isBye) ? `<button class="watch-btn" data-match="${m.id}">👀 Xem</button>` : '';
-    return `<div class="match-box"><div class="match-player">${p1Name}</div><div class="match-vs">VS</div><div class="match-player">${p2Name}</div>${winnerText}${watchBtnHtml}</div>`;
+    let replayBtnHtml = (m.winner && !m.isBye) ? `<button class="replay-btn" data-match="${m.id}">📼 Xem lại</button>` : '';
+    return `<div class="match-box"><div class="match-player">${p1Name}</div><div class="match-vs">VS</div><div class="match-player">${p2Name}</div>${winnerText}${watchBtnHtml}${replayBtnHtml}</div>`;
 }
 
 function renderBracket(data) {
@@ -639,33 +692,45 @@ function renderBracket(data) {
 
 socket.on('gameStart', (data) => {
     isSpectator = false;
+    moveSubmitPending = false;
+    currentMatchId = data.matchId || null;
     $('#lobby').hide(); $('#waitingRoom').hide(); $('#bracketArea').hide(); $('#gameArea').show();
     $('#exitSpectateBtn').hide(); $('#emojiPanel').show(); 
     currentWinScore = data.winScore; currentPuzzleRound = data.puzzleRound; amIP1 = data.isP1; 
     currentRoundMode = data.roundMode || 'regular';
-    $('#displayWinScore').text(currentWinScore); $('.player').eq(0).text("👦 Bạn"); $('#opponentNameDisplay').text(data.opponentName + " 👧");
-    $('#status').text("Đang tải dữ liệu cờ...");
+    window._lastScoreP1 = data.scoreP1 || 0;
+    window._lastScoreP2 = data.scoreP2 || 0;
+    $('#myNameDisplay').text('Bạn');
+    $('#opponentNameDisplay').text(data.opponentName || 'Đối thủ');
+    $('#status').text("Đang tải dữ liệu cờ...").removeClass('disconnect-warn');
     startPuzzleTimer(data.deadlineAt, data.timeLimitMs);
     initBoard();
     loadPuzzlesForLevel(data.level, function(puzzles) {
         puzzleList = puzzles; isMyTurnToSolve = true;
-        updateRopeUI(data.ropePosition); loadPuzzle(data.puzzleSeed);
+        updateMatchHud(data);
+        loadPuzzle(data.puzzleSeed, data.acceptedMoves || []);
     });
 });
 
 socket.on('spectateStart', (data) => {
     isSpectator = true;
+    moveSubmitPending = false;
+    currentMatchId = data.matchId || null;
     $('#lobby').hide(); $('#waitingRoom').hide(); $('#bracketArea').hide(); $('#gameArea').show();
     $('#exitSpectateBtn').show(); $('#emojiPanel').hide(); 
     currentWinScore = data.winScore; currentPuzzleRound = data.puzzleRound; amIP1 = true; 
     currentRoundMode = data.roundMode || 'regular';
-    $('#displayWinScore').text(currentWinScore); $('.player').eq(0).text(data.p1Name + " (P1)"); $('#opponentNameDisplay').text(data.p2Name + " (P2)");
-    $('#status').text("📺 Đang truyền hình trực tiếp...");
+    window._lastScoreP1 = data.scoreP1 || 0;
+    window._lastScoreP2 = data.scoreP2 || 0;
+    $('#myNameDisplay').text((data.p1Name || 'P1') + ' (P1)');
+    $('#opponentNameDisplay').text((data.p2Name || 'P2') + ' (P2)');
+    $('#status').text("📺 Đang truyền hình trực tiếp...").removeClass('disconnect-warn');
     startPuzzleTimer(data.deadlineAt, data.timeLimitMs);
     initBoard();
     loadPuzzlesForLevel(data.level, function(puzzles) {
         puzzleList = puzzles; isMyTurnToSolve = false;
-        updateRopeUI(data.ropePosition); loadPuzzle(data.puzzleSeed);
+        updateMatchHud(data);
+        loadPuzzle(data.puzzleSeed);
     });
 });
 
@@ -673,27 +738,47 @@ socket.on('spectateEnd', (data) => {
     if (isSpectator) {
         stopPuzzleTimer();
         isSpectator = false; $('#gameArea').hide(); $('#bracketArea').show();
-        renderBracket(data.bracket); alert(`Trận đấu kết thúc! Vị trí chiến thắng thuộc về: ${data.winner}`);
+        renderBracket(data.bracket);
+        $('#bracketStatus').text(`Trận đấu kết thúc! Thắng: ${data.winner}`);
     }
 });
 
 socket.on('byeMatch', () => { $('#bracketStatus').html("<strong style='color:green;'>Bạn được đặc cách vòng này! Đang chờ đối thủ khác thi đấu...</strong>"); });
 socket.on('update_game', (data) => {
+    moveSubmitPending = false;
     if (data.roundMode) currentRoundMode = data.roundMode;
-    currentPuzzleRound = data.puzzleRound; updateRopeUI(data.ropePosition);
+    currentPuzzleRound = data.puzzleRound;
+    updateMatchHud(data);
     startPuzzleTimer(data.deadlineAt, data.timeLimitMs);
-    $('#status').text(isSpectator ? "📺 Thế trận vừa thay đổi!" : "Thế trận đã thay đổi!"); loadPuzzle(data.puzzleSeed);
+    $('#status').text(isSpectator ? "📺 Thế trận vừa thay đổi!" : "Thế trận đã thay đổi!").removeClass('disconnect-warn');
+    loadPuzzle(data.puzzleSeed);
     if (data.message) {
         $('#status').text(data.message);
     }
 });
+socket.on('scoreUpdate', (data) => {
+    updateMatchHud(data);
+});
 socket.on('matchResult', (data) => {
     stopPuzzleTimer();
+    moveSubmitPending = false;
     isMyTurnToSolve = false; $('#gameArea').hide(); $('#bracketArea').show(); $('#bracketStatus').text(`Đang chờ các nhánh khác...`);
     renderBracket(data.bracket);
     if (data.reason) {
         $('#bracketStatus').text(data.reason);
     }
+    if (data.matchId) currentMatchId = data.matchId;
+});
+socket.on('opponentDisconnected', (data) => {
+    const secs = Math.ceil((data.graceMs || 45000) / 1000);
+    $('#status').addClass('disconnect-warn').text(
+        `⚠️ ${data.name || 'Đối thủ'} mất kết nối — còn ${secs}s trước khi xử thua.`
+    );
+});
+socket.on('opponentReconnected', (data) => {
+    $('#status').removeClass('disconnect-warn').text(
+        `✅ ${data.name || 'Đối thủ'} đã kết nối lại. Tiếp tục đấu!`
+    );
 });
 socket.on('tournamentOver', (data) => {
     stopPuzzleTimer();
@@ -706,26 +791,187 @@ socket.on('tournamentOver', (data) => {
 });
 socket.on('receiveEmoji', (emoji) => { showFloatingEmoji(emoji, 'opponent'); });
 
+function openReplay(matchId) {
+    if (!matchId) return;
+    $('#replayPanel').html('<p>Đang tải nhật ký...</p>');
+    $('#replayModal').css('display', 'flex');
+    $.getJSON(`/api/matches/${matchId}`)
+        .done((log) => {
+            let html = `<p><strong>${escapeHtml(log.p1?.name || '?')}</strong> vs <strong>${escapeHtml(log.p2?.name || '?')}</strong></p>`;
+            html += `<p>Kết quả: <strong>${escapeHtml(log.winner?.name || '---')}</strong></p>`;
+            if (log.reason) html += `<p>${escapeHtml(log.reason)}</p>`;
+            (log.puzzles || []).forEach((p, idx) => {
+                html += `<div class="replay-block"><h4>Puzzle ${idx + 1} · seed ${p.seed} · ${p.mode}</h4>`;
+                html += `<div>Kết quả: ${escapeHtml(p.outcome || '---')}</div>`;
+                const moves = p.moves || {};
+                Object.keys(moves).forEach(token => {
+                    const label = token === log.p1?.token ? log.p1.name : (token === log.p2?.token ? log.p2.name : shortIdFromToken(token));
+                    html += `<div>${escapeHtml(label)}: ${(moves[token] || []).join(', ') || '(chưa có nước)'}</div>`;
+                });
+                html += `</div>`;
+            });
+            if (!(log.puzzles || []).length) {
+                html += '<p>Chưa có dữ liệu puzzle.</p>';
+            }
+            $('#replayPanel').html(html);
+        })
+        .fail(() => {
+            $('#replayPanel').html('<p>Không tải được nhật ký trận (có thể trận cũ trước khi bật log).</p>');
+        });
+}
+
 function showFloatingEmoji(emoji, side) {
     let $emoji = $('<div class="floating-emoji"></div>').text(emoji);
     if (side === 'me') { $emoji.css({ bottom: '-20px', left: '10%' }); } else { $emoji.css({ bottom: '-20px', right: '10%' }); }
     $('#tugOfWar').append($emoji); setTimeout(() => { $emoji.remove(); }, 1500);
 }
 
-function updateRopeUI(position) {
-    let visualPos = amIP1 ? position : -position;
-    let percent = 50 + (visualPos * (45 / currentWinScore));
-    $('#marker').css('left', percent + '%');
+function updateRopeUI(position, scores) {
+    updateMatchHud({
+        ropePosition: position,
+        scoreP1: scores ? scores.scoreP1 : undefined,
+        scoreP2: scores ? scores.scoreP2 : undefined,
+        winScore: currentWinScore,
+        puzzleRound: currentPuzzleRound,
+        roundMode: currentRoundMode
+    });
 }
 
-function loadPuzzle(seed) {
+function buildPips(containerSel, filledCount, sideClass) {
+    const $box = $(containerSel);
+    $box.empty();
+    for (let i = 0; i < currentWinScore; i++) {
+        const filled = i < filledCount;
+        $box.append(`<span class="score-pip${filled ? ' filled ' + sideClass : ''}"></span>`);
+    }
+}
+
+function rebuildRopeTicks() {
+    const $ticks = $('#ropeTicks');
+    $ticks.empty();
+    for (let i = -currentWinScore; i <= currentWinScore; i++) {
+        if (i === 0) continue;
+        const visual = amIP1 ? i : -i;
+        const percent = 50 + (visual * (45 / currentWinScore));
+        const isGoal = Math.abs(i) === currentWinScore;
+        $ticks.append(`<span class="rope-tick${isGoal ? ' goal' : ''}" style="left:${percent}%"></span>`);
+    }
+}
+
+function flashScore(side) {
+    const $flash = $('#pullFlash');
+    const $fighter = side === 'me' ? $('#fighterMe') : $('#fighterOpp');
+    const $marker = $('#marker');
+    $flash.removeClass('show-me show-opp');
+    $fighter.removeClass('just-scored');
+    $marker.removeClass('yank');
+    if ($flash[0]) void $flash[0].offsetWidth;
+    $flash.addClass(side === 'me' ? 'show-me' : 'show-opp');
+    $fighter.addClass('just-scored');
+    $marker.addClass('yank');
+}
+
+function updateMatchHud(data) {
+    if (!data) return;
+    if (data.winScore) currentWinScore = data.winScore;
+    if (data.puzzleRound) currentPuzzleRound = data.puzzleRound;
+    if (data.roundMode) currentRoundMode = data.roundMode;
+
+    const scoreP1 = data.scoreP1 != null ? data.scoreP1 : (window._lastScoreP1 || 0);
+    const scoreP2 = data.scoreP2 != null ? data.scoreP2 : (window._lastScoreP2 || 0);
+    if (data.scoreP1 != null) window._lastScoreP1 = data.scoreP1;
+    if (data.scoreP2 != null) window._lastScoreP2 = data.scoreP2;
+
+    const myScore = amIP1 ? scoreP1 : scoreP2;
+    const oppScore = amIP1 ? scoreP2 : scoreP1;
+    const position = data.ropePosition != null ? data.ropePosition : 0;
+    const visualPos = amIP1 ? position : -position;
+    const myLead = Math.max(0, -visualPos);
+    const oppLead = Math.max(0, visualPos);
+
+    $('#myScoreNum').text(myScore);
+    $('#oppScoreNum').text(oppScore);
+    $('#scoreMyBig').text(myScore);
+    $('#scoreOppBig').text(oppScore);
+    $('#roundBadge').text(`Bài #${currentPuzzleRound}`);
+    const isSD = currentRoundMode === 'sudden_death';
+    $('#modeBadge').text(isSD ? '⚡ Sudden Death' : 'Thường').toggleClass('sudden', isSD);
+    $('#leadHint').text(
+        isSD
+            ? 'Sudden Death: giải đúng trước hoặc sai 1 nước là thua!'
+            : `Cần dẫn ${currentWinScore} vạch để thắng · Bạn ${myLead}/${currentWinScore} · Địch ${oppLead}/${currentWinScore}`
+    );
+
+    buildPips('#myScorePips', myLead, 'me');
+    buildPips('#oppScorePips', oppLead, 'opp');
+    rebuildRopeTicks();
+
+    const percent = 50 + (visualPos * (45 / Math.max(currentWinScore, 1)));
+    $('#marker').css('left', percent + '%');
+
+    const fillScale = 45 / Math.max(currentWinScore, 1);
+    $('#ropeFillMe').css('width', `${Math.max(0, -visualPos) * fillScale}%`);
+    $('#ropeFillOpp').css('width', `${Math.max(0, visualPos) * fillScale}%`);
+
+    $('#fighterMe').toggleClass('leading', myLead > oppLead);
+    $('#fighterOpp').toggleClass('leading', oppLead > myLead);
+
+    if (data.scoredSide) {
+        const iScored = (data.scoredSide === 'p1' && amIP1) || (data.scoredSide === 'p2' && !amIP1);
+        // Spectator: amIP1=true means left is P1
+        const flashSide = isSpectator
+            ? (data.scoredSide === 'p1' ? 'me' : 'opp')
+            : (iScored ? 'me' : 'opp');
+        flashScore(flashSide);
+    }
+}
+
+function applyUciMove(uci) {
+    if (!uci || uci.length < 4) return false;
+    const move = game.move({
+        from: uci.substring(0, 2),
+        to: uci.substring(2, 4),
+        promotion: uci.length > 4 ? uci[4] : 'q'
+    });
+    return !!move;
+}
+
+function loadPuzzle(seed, acceptedMoves) {
     if (!puzzleList || puzzleList.length === 0) return;
     currentPuzzle = puzzleList[seed % puzzleList.length];
     currentMoveIndex = 0; selectedSquare = null; $('.square-55d63').removeClass('highlight-square');
-    game.load(currentPuzzle.fen); board.position(currentPuzzle.fen, false);
-    board.orientation(game.turn() === 'w' ? 'black' : 'white');
+    game.load(currentPuzzle.fen);
+    moveSubmitPending = false;
+
+    const restored = Array.isArray(acceptedMoves) ? acceptedMoves : [];
+    const totalApplied = restored.length * 2;
+    for (let i = 0; i < totalApplied && i < currentPuzzle.solution.length; i++) {
+        let uci;
+        if (i % 2 === 1) {
+            uci = restored[(i - 1) / 2];
+        } else {
+            const moveRaw = currentPuzzle.solution[i];
+            uci = Array.isArray(moveRaw) ? moveRaw[0] : moveRaw;
+        }
+        applyUciMove(uci);
+        currentMoveIndex = i + 1;
+    }
+
+    board.position(game.fen(), false);
+    const startTurn = (currentPuzzle.fen.split(' ')[1] || 'w');
+    board.orientation(startTurn === 'w' ? 'black' : 'white');
     if (computerMoveTimer) clearTimeout(computerMoveTimer);
-    computerMoveTimer = setTimeout(makeComputerMove, 600); 
+
+    if (currentMoveIndex >= currentPuzzle.solution.length) {
+        isMyTurnToSolve = false;
+        return;
+    }
+
+    if (currentMoveIndex % 2 === 0) {
+        computerMoveTimer = setTimeout(makeComputerMove, restored.length ? 200 : 600);
+    } else if (!isSpectator) {
+        $('#status').text(currentMoveIndex === 1 ? "🔥 Nước đi sai lầm của địch! Trừng phạt ngay!" : "Địch đáp trả! Tính tiếp đi!");
+    }
 }
 
 function makeComputerMove() {
@@ -737,8 +983,41 @@ function makeComputerMove() {
     if (!isSpectator) { $('#status').text(currentMoveIndex === 1 ? "🔥 Nước đi sai lầm của địch! Trừng phạt ngay!" : "Địch đáp trả! Tính tiếp đi!"); }
 }
 
+function submitPlayerMove(moveStr, onReject) {
+    if (moveSubmitPending || isSpectator) return;
+    moveSubmitPending = true;
+    socket.emit('submit_move', {
+        roomCode: myRoomCode,
+        token: myToken,
+        puzzleRound: currentPuzzleRound,
+        move: moveStr
+    }, (res) => {
+        moveSubmitPending = false;
+        if (!res || !res.ok) {
+            if (typeof onReject === 'function') onReject(res);
+            if (res && res.mistake) {
+                isMyTurnToSolve = false;
+                $('#status').text(res.error || 'Bạn đi sai trong Sudden Death!');
+            } else {
+                $('#status').text((res && res.error) || 'Nước không được chấp nhận.');
+            }
+            return;
+        }
+        currentMoveIndex++;
+        board.position(game.fen());
+        if (res.solved) {
+            isMyTurnToSolve = false;
+            $('#status').text("Tuyệt vời! Đang giật dây kéo co...");
+        } else {
+            $('#status').text("Chính xác! Đợi máy phản đòn...");
+            if (computerMoveTimer) clearTimeout(computerMoveTimer);
+            computerMoveTimer = setTimeout(makeComputerMove, 600);
+        }
+    });
+}
+
 function handleSquareClick(square) {
-    if (isSpectator || !isMyTurnToSolve || currentMoveIndex % 2 === 0) return; 
+    if (isSpectator || !isMyTurnToSolve || moveSubmitPending || currentMoveIndex % 2 === 0) return; 
     let piece = game.get(square); let turnColor = game.turn();
 
     if (!selectedSquare) {
@@ -749,7 +1028,6 @@ function handleSquareClick(square) {
         } return;
     }
 
-    // Nếu nhấp lại vào chính quân cờ đó -> Bỏ chọn
     if (selectedSquare === square) {
         selectedSquare = null; $('.square-55d63').removeClass('highlight-square');
         return;
@@ -768,21 +1046,17 @@ function handleSquareClick(square) {
         selectedSquare = null;
 
         if (expectedMoves.includes(moveStr)) {
-            board.position(game.fen()); currentMoveIndex++;
-            if (currentMoveIndex === currentPuzzle.solution.length) {
-                $('#status').text("Tuyệt vời! Đang giật dây kéo co...");
-                socket.emit('solved_puzzle', { roomCode: myRoomCode, token: myToken, puzzleRound: currentPuzzleRound });
-            } else {
-                $('#status').text("Chính xác! Đợi máy phản đòn...");
-                if (computerMoveTimer) clearTimeout(computerMoveTimer); computerMoveTimer = setTimeout(makeComputerMove, 600);
-            }
+            submitPlayerMove(moveStr, () => {
+                game.undo();
+                board.position(game.fen());
+            });
         } else { 
-            game.undo(); $('#status').text("Đi sai rồi. Tính lại đi!"); 
-            board.position(game.fen()); 
+            game.undo();
+            board.position(game.fen());
             if (!isSpectator && currentRoundMode === 'sudden_death') {
-                isMyTurnToSolve = false;
-                socket.emit('playerMistake', { roomCode: myRoomCode, token: myToken, puzzleRound: currentPuzzleRound });
-                $('#status').text("Bạn đi sai trong Sudden Death! Chờ kết quả...");
+                submitPlayerMove(moveStr, () => {});
+            } else {
+                $('#status').text("Đi sai rồi. Tính lại đi!");
             }
         }
     } else {
@@ -793,13 +1067,13 @@ function handleSquareClick(square) {
 }
 
 function onDragStart(source, piece, position, orientation) {
-    if (isSpectator || !isMyTurnToSolve || currentMoveIndex % 2 === 0) return false; 
+    if (isSpectator || !isMyTurnToSolve || moveSubmitPending || currentMoveIndex % 2 === 0) return false; 
     if ((orientation === 'white' && piece.search(/^b/) !== -1) || (orientation === 'black' && piece.search(/^w/) !== -1)) return false;
     selectedSquare = null; $('.square-55d63').removeClass('highlight-square');
 }
 
 function onDrop(source, target) {
-    if (currentMoveIndex % 2 === 0) return 'snapback';
+    if (currentMoveIndex % 2 === 0 || moveSubmitPending) return 'snapback';
     
     let expectedMoves = currentPuzzle.solution[currentMoveIndex];
     if (!Array.isArray(expectedMoves)) expectedMoves = [expectedMoves];
@@ -813,23 +1087,20 @@ function onDrop(source, target) {
     let moveStr = source + target + (move.promotion ? move.promotion : '');
 
     if (expectedMoves.includes(moveStr)) {
-        currentMoveIndex++;
-        if (currentMoveIndex === currentPuzzle.solution.length) {
-            $('#status').text("Tuyệt vời! Đang giật dây kéo co...");
-            socket.emit('solved_puzzle', { roomCode: myRoomCode, token: myToken, puzzleRound: currentPuzzleRound });
-        } else {
-            $('#status').text("Chính xác! Đợi máy phản đòn...");
-            if (computerMoveTimer) clearTimeout(computerMoveTimer); computerMoveTimer = setTimeout(makeComputerMove, 600);
-        }
-    } else { 
-        game.undo(); $('#status').text("Đi sai rồi. Tính lại đi!"); 
-        if (!isSpectator && currentRoundMode === 'sudden_death') {
-            isMyTurnToSolve = false;
-            socket.emit('playerMistake', { roomCode: myRoomCode, token: myToken, puzzleRound: currentPuzzleRound });
-            $('#status').text("Bạn đi sai trong Sudden Death! Chờ kết quả...");
-        }
-        return 'snapback'; 
+        submitPlayerMove(moveStr, () => {
+            game.undo();
+            board.position(game.fen());
+        });
+        return;
     }
+
+    game.undo();
+    if (!isSpectator && currentRoundMode === 'sudden_death') {
+        submitPlayerMove(moveStr, () => {});
+    } else {
+        $('#status').text("Đi sai rồi. Tính lại đi!");
+    }
+    return 'snapback';
 }
 
 function initBoard() {

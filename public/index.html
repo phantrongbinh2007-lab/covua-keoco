@@ -21,6 +21,8 @@
                 <li>Sau 3 puzzle hòa liên tiếp: vào Sudden Death 30 giây (chỉ 1 lần).</li>
                 <li>Trong Sudden Death: ai đi sai 1 nước thua ngay.</li>
                 <li>Hết giờ Sudden Death mà chưa có người thắng: đồng thua.</li>
+                <li>Mất kết nối quá 45 giây khi đang đấu: bị xử thua.</li>
+                <li>Tên kỳ thủ gắn với ID thiết bị — không đổi được sau lần đăng ký đầu.</li>
             </ul>
             <button id="closeRulesBtn">Đóng Luật</button>
         </div>
@@ -34,6 +36,7 @@
                 <button class="lb-tab" data-tab="weekly">Tuần Này</button>
                 <button class="lb-tab" data-tab="monthly">Tháng Này</button>
             </div>
+            <p id="lbPeriodHint" class="lb-period-hint"></p>
             <div class="lb-body">
                 <table id="lbTable">
                     <thead><tr><th>Top</th><th>Kỳ Thủ</th><th>Điểm</th></tr></thead>
@@ -41,6 +44,14 @@
                 </table>
             </div>
             <button id="closeLbBtn">Đóng Bảng</button>
+        </div>
+    </div>
+
+    <div id="replayModal" class="modal-overlay" style="display: none;">
+        <div class="modal-content replay-modal">
+            <h2>📼 Nhật ký trận đấu</h2>
+            <div id="replayPanel"></div>
+            <button id="closeReplayBtn">Đóng</button>
         </div>
     </div>
 
@@ -70,8 +81,9 @@
             <button id="showLbBtn" class="pulse-btn">🏆 Xem Bảng Xếp Hạng 🏆</button>
 
             <div class="settings-box">
-                <label>Tên kỳ thủ (Bắt buộc):</label>
+                <label>Tên kỳ thủ (Bắt buộc — khóa sau lần đầu):</label>
                 <input type="text" id="playerName" placeholder="Nhập tên của bạn..." maxlength="15">
+                <p id="playerIdHint" class="player-id-hint">ID kỳ thủ: ---</p>
                 <label>Cấp độ bài tập:</label>
                 <select id="levelSelect">
                     <option value="1">Cấp độ 1 (Elo 1400 - 1500)</option>
@@ -112,20 +124,58 @@
 
         <div id="gameArea" style="display: none;">
             <button id="exitSpectateBtn" style="display:none; background: #95a5a6; margin-bottom: 15px;">⬅ Thoát Xem</button>
-            <div id="roomInfo">Chạm mốc: <strong id="displayWinScore"></strong> vạch</div>
-            <div id="puzzleTimer">⏱️ 60s</div>
-            <div id="tugOfWar">
-                <div class="player">👦 Bạn</div>
-                <div class="rope">
-                    <div class="center-mark"></div>
-                    <div id="marker">
-                        <span class="sweat-drop left">💦</span>
-                        <img src="https://upload.wikimedia.org/wikipedia/commons/4/42/Chess_klt45.svg" alt="Vua" class="king-piece">
-                        <span class="sweat-drop right">💦</span>
-                    </div> 
+
+            <div class="game-hud-top">
+                <div class="hud-chip" id="roundBadge">Bài #1</div>
+                <div id="puzzleTimer" class="hud-timer">
+                    <span class="timer-icon">⏱️</span>
+                    <span id="timerSeconds">60</span><span class="timer-unit">s</span>
                 </div>
-                <div class="player" id="opponentNameDisplay">Đối thủ 👧</div>
+                <div class="hud-chip mode" id="modeBadge">Thường</div>
             </div>
+
+            <div id="tugOfWar" class="tug-arena">
+                <div class="fighter me" id="fighterMe">
+                    <div class="fighter-avatar">♟️</div>
+                    <div class="fighter-name" id="myNameDisplay">Bạn</div>
+                    <div class="fighter-score" id="myScoreNum">0</div>
+                    <div class="fighter-sub">đã giải</div>
+                    <div class="score-pips" id="myScorePips"></div>
+                </div>
+
+                <div class="rope-zone">
+                    <div class="goal-flag left" title="Mốc thắng của bạn">🏁</div>
+                    <div class="rope">
+                        <div class="rope-fill me-fill" id="ropeFillMe"></div>
+                        <div class="rope-fill opp-fill" id="ropeFillOpp"></div>
+                        <div class="rope-ticks" id="ropeTicks"></div>
+                        <div class="center-mark"></div>
+                        <div id="marker">
+                            <span class="sweat-drop left">💦</span>
+                            <img src="https://upload.wikimedia.org/wikipedia/commons/4/42/Chess_klt45.svg" alt="Vua" class="king-piece">
+                            <span class="sweat-drop right">💦</span>
+                        </div>
+                    </div>
+                    <div class="goal-flag right" title="Mốc thắng đối thủ">🏁</div>
+                    <div class="scoreboard-line">
+                        <span id="scoreMyBig">0</span>
+                        <span class="score-sep">—</span>
+                        <span id="scoreOppBig">0</span>
+                    </div>
+                    <div class="lead-hint" id="leadHint">Cần dẫn 3 vạch để thắng</div>
+                </div>
+
+                <div class="fighter opp" id="fighterOpp">
+                    <div class="fighter-avatar">♞</div>
+                    <div class="fighter-name" id="opponentNameDisplay">Đối thủ</div>
+                    <div class="fighter-score" id="oppScoreNum">0</div>
+                    <div class="fighter-sub">đã giải</div>
+                    <div class="score-pips" id="oppScorePips"></div>
+                </div>
+
+                <div id="pullFlash" class="pull-flash" aria-hidden="true"></div>
+            </div>
+
             <div id="board" style="width: 400px; margin: 20px auto; max-width: 100%;"></div>
             <div id="status">Tập trung giải cờ...</div>
             <div id="emojiPanel">

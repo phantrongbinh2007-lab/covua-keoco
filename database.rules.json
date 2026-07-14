@@ -11,6 +11,14 @@
     "tournamentResults": {
       ".read": true,
       ".write": false
+    },
+    "players": {
+      ".read": true,
+      ".write": false
+    },
+    "matchLogs": {
+      ".read": true,
+      ".write": false
     }
   }
 }
