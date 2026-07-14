@@ -391,11 +391,36 @@ function shuffleArray(arr) {
     return a;
 }
 
+function pairPlayersIntoMatches(players, { allowBye = true } = {}) {
+    const shuffled = shuffleArray(players);
+    const matches = [];
+    let idx = 0;
+    while (idx + 1 < shuffled.length) {
+        matches.push(makeMatch(shuffled[idx], shuffled[idx + 1]));
+        idx += 2;
+    }
+    if (idx < shuffled.length && allowBye) {
+        matches.push(makeByeMatch(shuffled[idx]));
+    }
+    return matches;
+}
+
 function generateNextRound(room) {
     const players = [...room.activePlayers];
     const n = players.length;
-    const matches = [];
+    let matches = [];
     const isFirstRound = room.bracket.length === 0;
+
+    if (n <= 0) {
+        room.currentRoundMatches = [];
+        return;
+    }
+
+    if (n === 1) {
+        // Không tạo vòng "đặc cách" chỉ để crowning — caller sẽ kết thúc giải.
+        room.currentRoundMatches = [];
+        return;
+    }
 
     if (isFirstRound) {
         const bracketSize = Math.pow(2, Math.ceil(Math.log2(Math.max(n, 2))));
@@ -411,24 +436,17 @@ function generateNextRound(room) {
             for (let i = 0; i + 1 < playingPlayers.length; i += 2) {
                 matches.push(makeMatch(playingPlayers[i], playingPlayers[i + 1]));
             }
-            shuffleArray(matches);
-        } else if (n === 1) {
-            matches.push(makeByeMatch(players[0]));
-        } else {
-            for (let i = 0; i + 1 < n; i += 2) {
-                matches.push(makeMatch(players[i], players[i + 1]));
+            // Người lẻ còn lại (edge case) cũng được đặc cách, không bị bỏ sót.
+            if (playingPlayers.length % 2 === 1) {
+                matches.push(makeByeMatch(playingPlayers[playingPlayers.length - 1]));
             }
+            matches = shuffleArray(matches);
+        } else {
+            matches = pairPlayersIntoMatches(players, { allowBye: false });
         }
     } else {
-        const shuffled = shuffleArray(players);
-        let idx = 0;
-        while (idx + 1 < shuffled.length) {
-            matches.push(makeMatch(shuffled[idx], shuffled[idx + 1]));
-            idx += 2;
-        }
-        if (idx < shuffled.length) {
-            matches.push(makeByeMatch(shuffled[idx]));
-        }
+        // Vòng sau: chỉ bye khi số người lẻ (ví dụ đồng thua làm lệch bracket).
+        matches = pairPlayersIntoMatches(players, { allowBye: true });
     }
 
     room.currentRoundMatches = matches;
@@ -438,10 +456,20 @@ function generateNextRound(room) {
 function serializeMatch(match) {
     if (!match) return match;
     const { timerId, ...rest } = match;
+    if (rest.winner && !rest.settled) rest.settled = true;
     return rest;
 }
 
 function serializeRoom(room) {
+    // Khi còn cùng reference, lưu một lần rồi dùng lại để tránh lệch dữ liệu.
+    const bracket = (room.bracket || []).map(round => round.map(serializeMatch));
+    const lastRound = bracket.length ? bracket[bracket.length - 1] : [];
+    const currentIsLast =
+        room.currentRoundMatches &&
+        room.bracket &&
+        room.bracket.length &&
+        room.currentRoundMatches === room.bracket[room.bracket.length - 1];
+
     return {
         roomCode: room.roomCode,
         hostToken: room.hostToken,
@@ -451,8 +479,10 @@ function serializeRoom(room) {
         activePlayers: (room.activePlayers || []).map(p => ({
             id: p.id, token: p.token, name: p.name, compete: p.compete !== false
         })),
-        bracket: (room.bracket || []).map(round => round.map(serializeMatch)),
-        currentRoundMatches: (room.currentRoundMatches || []).map(serializeMatch),
+        bracket,
+        currentRoundMatches: currentIsLast
+            ? lastRound
+            : (room.currentRoundMatches || []).map(serializeMatch),
         level: room.level,
         winScore: room.winScore,
         status: room.status,
@@ -462,15 +492,40 @@ function serializeRoom(room) {
     };
 }
 
+function hydrateMatch(m) {
+    return {
+        ...m,
+        timerId: null,
+        settled: !!(m && (m.settled || m.winner))
+    };
+}
+
 function deserializeRoom(code, data) {
+    const bracket = (data.bracket || []).map(round => round.map(hydrateMatch));
+    let currentRoundMatches = (data.currentRoundMatches || []).map(hydrateMatch);
+
+    // Giữ cùng reference với vòng hiện tại để winner cập nhật không bị lệch UI bracket.
+    if (bracket.length > 0) {
+        const lastRound = bracket[bracket.length - 1];
+        const liveById = new Map(currentRoundMatches.map(m => [m.id, m]));
+        for (let i = 0; i < lastRound.length; i++) {
+            const live = liveById.get(lastRound[i].id);
+            if (live) {
+                lastRound[i] = hydrateMatch({ ...lastRound[i], ...live });
+            }
+        }
+        currentRoundMatches = lastRound;
+    }
+
     return {
         ...data,
         roomCode: code,
         players: (data.players || []).map(p => ({ ...p, disconnectTimer: null })),
         activePlayers: data.activePlayers || [],
-        bracket: (data.bracket || []).map(round => round.map(m => ({ ...m, timerId: null }))),
+        bracket,
         eliminationOrder: data.eliminationOrder || [],
-        currentRoundMatches: (data.currentRoundMatches || []).map(m => ({ ...m, timerId: null }))
+        currentRoundMatches,
+        advanceTimer: null
     };
 }
 
@@ -483,6 +538,11 @@ function persistRoom(roomCode) {
 }
 
 function removeRoom(roomCode) {
+    const room = rooms[roomCode];
+    if (room) {
+        clearAdvanceTimer(room);
+        (room.currentRoundMatches || []).forEach(clearMatchTimer);
+    }
     delete rooms[roomCode];
     dbRemove(`rooms/${roomCode}`).catch(err => {
         console.error(`❌ Xóa phòng [${roomCode}]:`, err.message);
@@ -734,34 +794,51 @@ async function finishTournament(room, roomCode, championName) {
     removeRoom(roomCode);
 }
 
+function clearAdvanceTimer(room) {
+    if (room.advanceTimer) {
+        clearTimeout(room.advanceTimer);
+        room.advanceTimer = null;
+    }
+}
+
+function scheduleNextRound(room, roomCode) {
+    clearAdvanceTimer(room);
+    room.advanceTimer = setTimeout(() => {
+        room.advanceTimer = null;
+        if (!rooms[roomCode] || rooms[roomCode] !== room) return;
+        startNewRound(room, roomCode);
+    }, 2000);
+}
+
 function checkAndAdvanceTournament(room, roomCode) {
     io.to(roomCode).emit('updateBracketOnly', buildBracketPayload(room));
     persistRoom(roomCode);
 
-    if (room.currentRoundMatches.every(m => m.winner !== null)) {
-        room.currentRoundMatches.forEach(clearMatchTimer);
-        room.activePlayers = room.currentRoundMatches
-            .map(m => (m.winner && !m.winner.isDoubleLoss ? m.winner : null))
-            .filter(Boolean);
+    if (!room.currentRoundMatches.length) return;
+    if (!room.currentRoundMatches.every(m => m.winner !== null)) return;
 
-        const realMatchCount = room.currentRoundMatches.filter(m => !m.isBye).length;
+    room.currentRoundMatches.forEach(clearMatchTimer);
+    room.activePlayers = room.currentRoundMatches
+        .map(m => (m.winner && !m.winner.isDoubleLoss ? m.winner : null))
+        .filter(Boolean);
 
-        if (room.activePlayers.length === 1) {
-            if (realMatchCount > 1) {
-                setTimeout(() => { startNewRound(room, roomCode); }, 2000);
-            } else {
-                addScore(room.activePlayers[0].name, 10);
-                finishTournament(room, roomCode, room.activePlayers[0].name);
-            }
-        } else if (room.activePlayers.length > 1) {
-            setTimeout(() => { startNewRound(room, roomCode); }, 2000);
-        } else {
-            finishTournament(room, roomCode, 'Không có nhà vô địch (đồng thua)');
-        }
+    if (room.activePlayers.length === 1) {
+        // Còn 1 người = vô địch. Không tạo vòng đặc cách thừa.
+        clearAdvanceTimer(room);
+        addScore(room.activePlayers[0].name, 10);
+        finishTournament(room, roomCode, room.activePlayers[0].name);
+    } else if (room.activePlayers.length > 1) {
+        scheduleNextRound(room, roomCode);
+    } else {
+        clearAdvanceTimer(room);
+        finishTournament(room, roomCode, 'Không có nhà vô địch (đồng thua)');
     }
 }
 
 function resolveMatchWinner(room, roomCode, match, winner, reasonMessage) {
+    // Dùng settled (không check winner): decideDoubleLoss gán winner trước khi gọi hàm này.
+    if (!match || match.settled) return;
+    match.settled = true;
     clearMatchTimer(match);
     match.winner = winner;
 
@@ -982,14 +1059,27 @@ function launchRoundMatches(room, roomCode) {
         }
     });
     persistRoom(roomCode);
+    // Bye đã có winner sẵn — nếu cả vòng chỉ còn bye (hoặc vừa xong hết) thì tiến vòng.
+    checkAndAdvanceTournament(room, roomCode);
 }
 
 function startNewRound(room, roomCode) {
     generateNextRound(room);
+    if (!room.currentRoundMatches.length) {
+        if (room.activePlayers.length === 1) {
+            addScore(room.activePlayers[0].name, 10);
+            finishTournament(room, roomCode, room.activePlayers[0].name);
+        } else {
+            finishTournament(room, roomCode, 'Không có nhà vô địch (đồng thua)');
+        }
+        return;
+    }
+
     io.to(roomCode).emit('showBracket', buildBracketPayload(room));
     persistRoom(roomCode);
 
     runCountdown(roomCode, ROUND_START_COUNTDOWN, 'roundCountdown', () => {
+        if (!rooms[roomCode] || rooms[roomCode] !== room) return;
         launchRoundMatches(room, roomCode);
     });
 }
@@ -1263,13 +1353,17 @@ io.on('connection', (socket) => {
 
         player.id = socket.id;
         joinPlayerChannels(socket, player.token, roomCode);
+        clearAdvanceTimer(room);
         room.status = 'countdown';
         room.initialPlayerCount = competitors.length;
         room.eliminationOrder = [];
-        room.activePlayers = [...competitors].sort(() => Math.random() - 0.5);
+        room.bracket = [];
+        room.currentRoundMatches = [];
+        room.activePlayers = shuffleArray(competitors);
         persistRoom(roomCode);
 
         runCountdown(roomCode, TOURNAMENT_START_COUNTDOWN, 'tournamentCountdown', () => {
+            if (!rooms[roomCode] || rooms[roomCode] !== room) return;
             room.status = 'playing';
             persistRoom(roomCode);
             startNewRound(room, roomCode);
