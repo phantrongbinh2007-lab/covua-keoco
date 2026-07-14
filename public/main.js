@@ -27,6 +27,8 @@ let currentRoundMode = 'regular';
 let puzzleDeadlineAt = null;
 let puzzleTimerInterval = null;
 let boardOrientation = 'white';
+let currentPuzzleSeed = null;
+let submitInFlight = false;
 
 let globalLeaderboard = { daily: {}, weekly: {}, monthly: {}, periods: {} };
 let currentLbTab = 'daily';
@@ -693,6 +695,7 @@ function renderBracket(data) {
 socket.on('gameStart', (data) => {
     isSpectator = false;
     moveSubmitPending = false;
+    submitInFlight = false;
     currentMatchId = data.matchId || null;
     $('#lobby').hide(); $('#waitingRoom').hide(); $('#bracketArea').hide(); $('#gameArea').show();
     $('#exitSpectateBtn').hide(); $('#emojiPanel').show(); 
@@ -714,6 +717,7 @@ socket.on('gameStart', (data) => {
 socket.on('spectateStart', (data) => {
     isSpectator = true;
     moveSubmitPending = false;
+    submitInFlight = false;
     currentMatchId = data.matchId || null;
     $('#lobby').hide(); $('#waitingRoom').hide(); $('#bracketArea').hide(); $('#gameArea').show();
     $('#exitSpectateBtn').show(); $('#emojiPanel').hide(); 
@@ -744,6 +748,7 @@ socket.on('spectateEnd', (data) => {
 socket.on('byeMatch', () => { $('#bracketStatus').html("<strong style='color:green;'>Bạn được đặc cách vòng này! Đang chờ đối thủ khác thi đấu...</strong>"); });
 socket.on('update_game', (data) => {
     moveSubmitPending = false;
+    submitInFlight = false;
     if (data.roundMode) currentRoundMode = data.roundMode;
     currentPuzzleRound = data.puzzleRound;
     updateMatchHud(data);
@@ -934,6 +939,28 @@ function applyUciMove(uci) {
     return !!move;
 }
 
+function solutionOptionsAt(index) {
+    if (!currentPuzzle || !currentPuzzle.solution || index < 0 || index >= currentPuzzle.solution.length) {
+        return [];
+    }
+    const raw = currentPuzzle.solution[index];
+    return Array.isArray(raw) ? raw : [raw];
+}
+
+function applySolutionIndex(index, preferredUci) {
+    const options = solutionOptionsAt(index);
+    if (!options.length) return null;
+    const ordered = preferredUci
+        ? [preferredUci, ...options.filter(u => u !== preferredUci)]
+        : options;
+    for (const uci of ordered) {
+        if (applyUciMove(uci)) {
+            return [uci.substring(0, 2), uci.substring(2, 4)];
+        }
+    }
+    return null;
+}
+
 function toDests(chess) {
     const dests = new Map();
     chess.SQUARES.forEach((sq) => {
@@ -943,23 +970,29 @@ function toDests(chess) {
     return dests;
 }
 
+function turnColorName() {
+    return game.turn() === 'w' ? 'white' : 'black';
+}
+
 function canPlayerMoveNow() {
-    return !isSpectator && isMyTurnToSolve && !moveSubmitPending
-        && !!currentPuzzle && (currentMoveIndex % 2 === 1)
-        && currentMoveIndex < currentPuzzle.solution.length;
+    if (isSpectator || !isMyTurnToSolve || moveSubmitPending || submitInFlight) return false;
+    if (!currentPuzzle || currentMoveIndex >= currentPuzzle.solution.length) return false;
+    // Chẵn = nước máy; lẻ = nước người
+    if (currentMoveIndex % 2 === 0) return false;
+    // Phải đúng lượt màu đang ngồi (tránh kẹt sau khi vừa đi xong)
+    return turnColorName() === boardOrientation;
 }
 
 function syncGround(extra = {}) {
     if (!ground) return;
-    const turnColor = game.turn() === 'w' ? 'white' : 'black';
+    const turnColor = turnColorName();
     const playable = canPlayerMoveNow();
-    ground.set({
+    const config = {
         fen: game.fen(),
         orientation: boardOrientation,
         turnColor,
-        check: game.in_check(),
-        lastMove: extra.lastMove || undefined,
-        viewOnly: isSpectator,
+        check: typeof game.in_check === 'function' ? game.in_check() : false,
+        viewOnly: !!isSpectator,
         movable: {
             color: playable ? turnColor : undefined,
             dests: playable ? toDests(game) : new Map(),
@@ -971,7 +1004,10 @@ function syncGround(extra = {}) {
         selectable: { enabled: playable },
         premovable: { enabled: false },
         animation: { enabled: true, duration: 180 }
-    });
+    };
+    if (extra.lastMove) config.lastMove = extra.lastMove;
+    else if (extra.clearLastMove) config.lastMove = undefined;
+    ground.set(config);
 }
 
 function onCgAfterMove(orig, dest) {
@@ -980,11 +1016,14 @@ function onCgAfterMove(orig, dest) {
         return;
     }
 
-    let expectedMoves = currentPuzzle.solution[currentMoveIndex];
-    if (!Array.isArray(expectedMoves)) expectedMoves = [expectedMoves];
+    const expectedMoves = solutionOptionsAt(currentMoveIndex);
+    if (!expectedMoves.length) {
+        syncGround();
+        return;
+    }
 
-    const matchExpected = expectedMoves.find(m => m.length >= 4 && m.startsWith(orig + dest));
-    const promoPiece = matchExpected && matchExpected.length > 4 ? matchExpected[4] : 'q';
+    const matchExpected = expectedMoves.find(m => String(m).length >= 4 && String(m).startsWith(orig + dest));
+    const promoPiece = matchExpected && String(matchExpected).length > 4 ? String(matchExpected)[4] : 'q';
     const move = game.move({ from: orig, to: dest, promotion: promoPiece });
 
     if (!move) {
@@ -995,19 +1034,19 @@ function onCgAfterMove(orig, dest) {
     const moveStr = orig + dest + (move.promotion ? move.promotion : '');
 
     if (expectedMoves.includes(moveStr)) {
+        // Đã đi xong nước người — khóa kéo quân ngay (lượt màu đã đổi)
         syncGround({ lastMove: [orig, dest] });
-        submitPlayerMove(moveStr, () => {
+        submitPlayerMove(moveStr, currentMoveIndex, () => {
             game.undo();
-            syncGround();
+            syncGround({ clearLastMove: true });
         });
         return;
     }
 
-    // Sai lời giải
     game.undo();
     if (!isSpectator && currentRoundMode === 'sudden_death') {
         syncGround();
-        submitPlayerMove(moveStr, () => {});
+        submitPlayerMove(moveStr, currentMoveIndex, () => {});
         return;
     }
     $('#status').text('Đi sai rồi. Tính lại đi!');
@@ -1016,28 +1055,25 @@ function onCgAfterMove(orig, dest) {
 
 function loadPuzzle(seed, acceptedMoves) {
     if (!puzzleList || puzzleList.length === 0) return;
+    currentPuzzleSeed = seed;
     currentPuzzle = puzzleList[seed % puzzleList.length];
     currentMoveIndex = 0;
     moveSubmitPending = false;
+    submitInFlight = false;
     if (!isSpectator) isMyTurnToSolve = true;
 
     game.load(currentPuzzle.fen);
 
     const restored = Array.isArray(acceptedMoves) ? acceptedMoves : [];
-    const totalApplied = restored.length * 2;
     let lastMove = null;
+    // Khôi phục: máy(0)+người(1)+máy(2)+... theo số nước người đã được server chấp nhận
+    const totalApplied = restored.length * 2;
     for (let i = 0; i < totalApplied && i < currentPuzzle.solution.length; i++) {
-        let uci;
-        if (i % 2 === 1) {
-            uci = restored[(i - 1) / 2];
-        } else {
-            const moveRaw = currentPuzzle.solution[i];
-            uci = Array.isArray(moveRaw) ? moveRaw[0] : moveRaw;
-        }
-        if (applyUciMove(uci)) {
-            lastMove = [uci.substring(0, 2), uci.substring(2, 4)];
-            currentMoveIndex = i + 1;
-        }
+        const preferred = (i % 2 === 1) ? restored[(i - 1) / 2] : null;
+        const played = applySolutionIndex(i, preferred);
+        if (!played) break;
+        lastMove = played;
+        currentMoveIndex = i + 1;
     }
 
     const startTurn = (currentPuzzle.fen.split(' ')[1] || 'w');
@@ -1055,35 +1091,49 @@ function loadPuzzle(seed, acceptedMoves) {
         return;
     }
 
+    syncGround({ lastMove });
+
     if (currentMoveIndex % 2 === 0) {
-        syncGround({ lastMove });
-        computerMoveTimer = setTimeout(makeComputerMove, restored.length ? 200 : 500);
-    } else {
-        syncGround({ lastMove });
-        if (!isSpectator) {
-            $('#status').text(currentMoveIndex === 1
-                ? '🔥 Nước đi sai lầm của địch! Trừng phạt ngay!'
-                : 'Địch đáp trả! Tính tiếp đi!');
-        }
+        computerMoveTimer = setTimeout(makeComputerMove, restored.length ? 180 : 450);
+    } else if (!isSpectator) {
+        $('#status').text(currentMoveIndex === 1
+            ? '🔥 Nước đi sai lầm của địch! Trừng phạt ngay!'
+            : 'Địch đáp trả! Tính tiếp đi!');
     }
 }
 
 function makeComputerMove() {
-    if (!currentPuzzle || currentMoveIndex >= currentPuzzle.solution.length) return;
+    if (!currentPuzzle) return;
     if (currentMoveIndex % 2 !== 0) return;
+    if (currentMoveIndex >= currentPuzzle.solution.length) return;
+    if (moveSubmitPending || submitInFlight) return;
 
-    let moveRaw = currentPuzzle.solution[currentMoveIndex];
-    let moveUci = Array.isArray(moveRaw) ? moveRaw[0] : moveRaw;
-    const from = moveUci.substring(0, 2);
-    const to = moveUci.substring(2, 4);
-    const promo = moveUci.length > 4 ? moveUci[4] : 'q';
+    const idx = currentMoveIndex;
+    let lastMove = applySolutionIndex(idx);
 
-    if (!game.move({ from, to, promotion: promo })) {
-        console.warn('Computer move failed', moveUci);
+    // Nếu lệch thế cờ, dựng lại từ đầu rồi thử lại
+    if (!lastMove) {
+        game.load(currentPuzzle.fen);
+        for (let i = 0; i < idx; i++) {
+            if (!applySolutionIndex(i)) {
+                console.warn('Rebuild failed at', i);
+                $('#status').text('Lỗi đồng bộ thế cờ — đang tải lại bài...');
+                if (currentPuzzleSeed != null) loadPuzzle(currentPuzzleSeed);
+                return;
+            }
+        }
+        lastMove = applySolutionIndex(idx);
+    }
+
+    if (!lastMove) {
+        console.warn('Computer move failed', idx, solutionOptionsAt(idx));
+        $('#status').text('Lỗi nước máy — đang tải lại bài...');
+        if (currentPuzzleSeed != null) loadPuzzle(currentPuzzleSeed);
         return;
     }
-    currentMoveIndex++;
-    syncGround({ lastMove: [from, to] });
+
+    currentMoveIndex = idx + 1;
+    syncGround({ lastMove });
 
     if (!isSpectator) {
         $('#status').text(currentMoveIndex === 1
@@ -1092,14 +1142,16 @@ function makeComputerMove() {
     }
 }
 
-function submitPlayerMove(moveStr, onReject) {
-    if (moveSubmitPending || isSpectator) return;
+function submitPlayerMove(moveStr, playedIndex, onReject) {
+    if (moveSubmitPending || submitInFlight || isSpectator) return;
     moveSubmitPending = true;
+    submitInFlight = true;
     syncGround();
 
     const safety = setTimeout(() => {
-        if (!moveSubmitPending) return;
+        if (!moveSubmitPending && !submitInFlight) return;
         moveSubmitPending = false;
+        submitInFlight = false;
         $('#status').text('Máy chủ phản hồi chậm — thử lại nước đi.');
         syncGround();
     }, 8000);
@@ -1112,6 +1164,8 @@ function submitPlayerMove(moveStr, onReject) {
     }, (res) => {
         clearTimeout(safety);
         moveSubmitPending = false;
+        submitInFlight = false;
+
         if (!res || !res.ok) {
             if (typeof onReject === 'function') onReject(res);
             if (res && res.mistake) {
@@ -1123,17 +1177,23 @@ function submitPlayerMove(moveStr, onReject) {
             syncGround();
             return;
         }
-        currentMoveIndex++;
+
+        // Nước vừa đi là playedIndex; sau khi server OK → đứng ở playedIndex+1
+        const afterPlayerIndex = (typeof playedIndex === 'number' ? playedIndex : currentMoveIndex) + 1;
+
         if (res.solved) {
             isMyTurnToSolve = false;
+            currentMoveIndex = currentPuzzle.solution.length;
             $('#status').text('Tuyệt vời! Đang giật dây kéo co...');
             syncGround();
-        } else {
-            $('#status').text('Chính xác! Đợi máy phản đòn...');
-            syncGround();
-            if (computerMoveTimer) clearTimeout(computerMoveTimer);
-            computerMoveTimer = setTimeout(makeComputerMove, 500);
+            return;
         }
+
+        currentMoveIndex = afterPlayerIndex;
+        $('#status').text('Chính xác! Đợi máy phản đòn...');
+        syncGround();
+        if (computerMoveTimer) clearTimeout(computerMoveTimer);
+        computerMoveTimer = setTimeout(makeComputerMove, 400);
     });
 }
 
