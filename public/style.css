@@ -10,6 +10,12 @@ button:hover { background: #c0392b; transform: scale(1.05); }
 .pulse-btn { background: #f1c40f !important; color: #d35400 !important; width: 100%; margin-bottom: 25px; font-size: 20px; animation: pulsing 1.5s infinite; border: 2px solid #e67e22 !important; }
 .rules-btn { width: 100%; margin-bottom: 12px; background: #34495e; }
 .rules-btn:hover { background: #2c3e50; }
+.mute-btn.muted { opacity: 0.75; background: #7f8c8d !important; }
+.mute-btn-inline {
+    width: auto; padding: 6px 12px; font-size: 14px; margin: 0 0 10px;
+    background: #5d4037; float: right;
+}
+.mute-btn-inline:hover { background: #4e342e; transform: scale(1.05); }
 @keyframes pulsing { 0% { transform: scale(1); box-shadow: 0 0 0 0 rgba(243, 156, 18, 0.7); } 70% { transform: scale(1.03); box-shadow: 0 0 0 15px rgba(243, 156, 18, 0); } 100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(243, 156, 18, 0); } }
 
 /* CHỐNG TÀNG HÌNH cũ của chessboard.js — giữ để không ảnh hưởng */

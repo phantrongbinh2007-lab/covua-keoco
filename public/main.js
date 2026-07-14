@@ -1,4 +1,10 @@
 import { Chessground } from '/vendor/chessground/dist/chessground.min.js';
+import {
+    unlockAudio, toggleMute, isMuted, playCountdownTick, resetCountdownMemory,
+    playMoveCorrect, playMoveWrong, playComputerMove, playRopePull,
+    playSuddenDeath, playTimerUrgent, resetUrgentMemory,
+    playMatchWin, playMatchLose, playPuzzleDraw
+} from './sfx.js';
 
 const $ = window.jQuery;
 const Chess = window.Chess;
@@ -279,7 +285,13 @@ function startPuzzleTimer(deadlineAt, timeLimitMs) {
         $timer.toggleClass('sudden', currentRoundMode === 'sudden_death');
         $timer.toggleClass('urgent', seconds <= 10 && currentRoundMode !== 'sudden_death');
         $('.timer-icon').text(currentRoundMode === 'sudden_death' ? '⚡' : '⏱️');
-        if (remainingMs <= 0) stopPuzzleTimer();
+        if (seconds <= 10 && remainingMs > 0 && !isSpectator) {
+            playTimerUrgent(seconds);
+        }
+        if (remainingMs <= 0) {
+            resetUrgentMemory();
+            stopPuzzleTimer();
+        }
     };
 
     render();
@@ -304,8 +316,10 @@ function showCountdownOverlay(label, seconds) {
     if (seconds > 0) {
         $('#countdownNumber').text(seconds);
         $('#countdownOverlay').css('display', 'flex');
+        playCountdownTick(seconds);
     } else {
         $('#countdownNumber').text('GO!');
+        playCountdownTick(0);
         setTimeout(() => $('#countdownOverlay').hide(), 600);
     }
 }
@@ -325,6 +339,28 @@ $(document).ready(function() {
     const savedName = (localStorage.getItem('chessTugName') || '').trim();
     if (savedName) $('#playerName').val(savedName);
     $('#playerIdHint').text(`ID kỳ thủ: #${shortIdFromToken(myToken)}`);
+
+    function refreshMuteBtn() {
+        const on = !isMuted();
+        $('.mute-btn').each(function() {
+            const $btn = $(this);
+            if ($btn.hasClass('mute-btn-inline')) {
+                $btn.text(on ? '🔊' : '🔇').attr('title', on ? 'Tắt âm thanh' : 'Bật âm thanh');
+            } else {
+                $btn.text(on ? '🔊 Âm thanh: Bật' : '🔇 Âm thanh: Tắt');
+            }
+            $btn.toggleClass('muted', !on);
+        });
+    }
+    refreshMuteBtn();
+    $(document).on('click', '.mute-btn', function(e) {
+        e.preventDefault();
+        unlockAudio();
+        toggleMute();
+        refreshMuteBtn();
+    });
+    // Mở khóa audio sau thao tác đầu tiên
+    $(document).one('pointerdown keydown', () => unlockAudio());
 
     whenSocketReady(() => {
         socket.emit('getPlayerProfile', { token: myToken }, (res) => {
@@ -621,20 +657,28 @@ socket.on('waitNotice', (msg) => { $('#waitStatus').text(msg); });
 
 socket.on('tournamentCountdown', (data) => {
     $('#startTournamentBtn').prop('disabled', true);
+    unlockAudio();
     if (data.seconds > 0) {
         $('#waitStatus').text(`Giải bắt đầu sau ${data.seconds} giây...`);
         showCountdownOverlay('🔥 Giải sắp bắt đầu!', data.seconds);
     } else {
+        resetCountdownMemory();
         $('#waitingRoom').hide();
         $('#countdownOverlay').hide();
+        playCountdownTick(0);
     }
 });
 
 socket.on('roundCountdown', (data) => {
+    unlockAudio();
     if (data.seconds > 0) {
         $('#bracketStatus').text(`Trận đấu bắt đầu sau ${data.seconds}s...`);
+        showCountdownOverlay('⚔️ Vào trận!', data.seconds);
     } else {
+        resetCountdownMemory();
         $('#bracketStatus').text('⚔️ Bắt đầu!');
+        playCountdownTick(0);
+        setTimeout(() => $('#countdownOverlay').hide(), 500);
     }
 });
 
@@ -707,6 +751,7 @@ socket.on('gameStart', (data) => {
     $('#opponentNameDisplay').text(data.opponentName || 'Đối thủ');
     $('#status').text("Đang tải dữ liệu cờ...").removeClass('disconnect-warn');
     startPuzzleTimer(data.deadlineAt, data.timeLimitMs);
+    resetUrgentMemory();
     loadPuzzlesForLevel(data.level, function(puzzles) {
         puzzleList = puzzles; isMyTurnToSolve = true;
         updateMatchHud(data);
@@ -729,6 +774,7 @@ socket.on('spectateStart', (data) => {
     $('#opponentNameDisplay').text((data.p2Name || 'P2') + ' (P2)');
     $('#status').text("📺 Đang truyền hình trực tiếp...").removeClass('disconnect-warn');
     startPuzzleTimer(data.deadlineAt, data.timeLimitMs);
+    resetUrgentMemory();
     loadPuzzlesForLevel(data.level, function(puzzles) {
         puzzleList = puzzles; isMyTurnToSolve = false;
         updateMatchHud(data);
@@ -749,10 +795,19 @@ socket.on('byeMatch', () => { $('#bracketStatus').html("<strong style='color:gre
 socket.on('update_game', (data) => {
     moveSubmitPending = false;
     submitInFlight = false;
+    const prevMode = currentRoundMode;
     if (data.roundMode) currentRoundMode = data.roundMode;
     currentPuzzleRound = data.puzzleRound;
     updateMatchHud(data);
+    resetUrgentMemory();
     startPuzzleTimer(data.deadlineAt, data.timeLimitMs);
+
+    if (data.roundMode === 'sudden_death' && prevMode !== 'sudden_death') {
+        playSuddenDeath();
+    } else if (data.message && /hòa puzzle|Hết giờ/i.test(data.message)) {
+        playPuzzleDraw();
+    }
+
     $('#status').text(isSpectator ? "📺 Thế trận vừa thay đổi!" : "Thế trận đã thay đổi!").removeClass('disconnect-warn');
     loadPuzzle(data.puzzleSeed);
     if (data.message) {
@@ -764,13 +819,24 @@ socket.on('scoreUpdate', (data) => {
 });
 socket.on('matchResult', (data) => {
     stopPuzzleTimer();
+    resetUrgentMemory();
     moveSubmitPending = false;
+    submitInFlight = false;
     isMyTurnToSolve = false; $('#gameArea').hide(); $('#bracketArea').show(); $('#bracketStatus').text(`Đang chờ các nhánh khác...`);
     renderBracket(data.bracket);
     if (data.reason) {
         $('#bracketStatus').text(data.reason);
     }
     if (data.matchId) currentMatchId = data.matchId;
+
+    const myName = (localStorage.getItem('chessTugName') || '').trim();
+    if (data.isDoubleLoss) {
+        playPuzzleDraw();
+    } else if (data.winner && myName && data.winner === myName) {
+        playMatchWin();
+    } else {
+        playMatchLose();
+    }
 });
 socket.on('opponentDisconnected', (data) => {
     const secs = Math.ceil((data.graceMs || 45000) / 1000);
@@ -921,11 +987,11 @@ function updateMatchHud(data) {
 
     if (data.scoredSide) {
         const iScored = (data.scoredSide === 'p1' && amIP1) || (data.scoredSide === 'p2' && !amIP1);
-        // Spectator: amIP1=true means left is P1
         const flashSide = isSpectator
             ? (data.scoredSide === 'p1' ? 'me' : 'opp')
             : (iScored ? 'me' : 'opp');
         flashScore(flashSide);
+        playRopePull(flashSide === 'me');
     }
 }
 
@@ -1034,6 +1100,7 @@ function onCgAfterMove(orig, dest) {
     const moveStr = orig + dest + (move.promotion ? move.promotion : '');
 
     if (expectedMoves.includes(moveStr)) {
+        playMoveCorrect();
         // Đã đi xong nước người — khóa kéo quân ngay (lượt màu đã đổi)
         syncGround({ lastMove: [orig, dest] });
         submitPlayerMove(moveStr, currentMoveIndex, () => {
@@ -1044,6 +1111,7 @@ function onCgAfterMove(orig, dest) {
     }
 
     game.undo();
+    playMoveWrong();
     if (!isSpectator && currentRoundMode === 'sudden_death') {
         syncGround();
         submitPlayerMove(moveStr, currentMoveIndex, () => {});
@@ -1134,6 +1202,7 @@ function makeComputerMove() {
 
     currentMoveIndex = idx + 1;
     syncGround({ lastMove });
+    playComputerMove();
 
     if (!isSpectator) {
         $('#status').text(currentMoveIndex === 1
