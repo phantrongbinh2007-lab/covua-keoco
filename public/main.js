@@ -980,8 +980,9 @@ function updateMatchHud(data) {
     const oppScore = amIP1 ? scoreP2 : scoreP1;
     const position = data.ropePosition != null ? data.ropePosition : 0;
     const visualPos = amIP1 ? position : -position;
-    const myLead = Math.max(0, -visualPos);
-    const oppLead = Math.max(0, visualPos);
+    // Pips = tiến độ đua đến winScore (điểm tuyệt đối), không phải lead net.
+    const myProgress = Math.min(myScore, currentWinScore);
+    const oppProgress = Math.min(oppScore, currentWinScore);
 
     $('#myScoreNum').text(myScore);
     $('#oppScoreNum').text(oppScore);
@@ -993,22 +994,24 @@ function updateMatchHud(data) {
     $('#leadHint').text(
         isSD
             ? 'Sudden Death: giải đúng trước hoặc sai 1 nước là thua!'
-            : `Cần dẫn ${currentWinScore} vạch để thắng · Bạn ${myLead}/${currentWinScore} · Địch ${oppLead}/${currentWinScore}`
+            : `Đua đến ${currentWinScore} điểm · Bạn ${myScore}/${currentWinScore} · Địch ${oppScore}/${currentWinScore}`
     );
 
-    buildPips('#myScorePips', myLead, 'me');
-    buildPips('#oppScorePips', oppLead, 'opp');
+    buildPips('#myScorePips', myProgress, 'me');
+    buildPips('#oppScorePips', oppProgress, 'opp');
     rebuildRopeTicks();
 
-    const percent = 50 + (visualPos * (45 / Math.max(currentWinScore, 1)));
+    // Dây kéo theo hiệu số; giới hạn hiển thị trong ±winScore để không văng khỏi UI.
+    const clampedPos = Math.max(-currentWinScore, Math.min(currentWinScore, visualPos));
+    const percent = 50 + (clampedPos * (45 / Math.max(currentWinScore, 1)));
     $('#marker').css('left', percent + '%');
 
     const fillScale = 45 / Math.max(currentWinScore, 1);
-    $('#ropeFillMe').css('width', `${Math.max(0, -visualPos) * fillScale}%`);
-    $('#ropeFillOpp').css('width', `${Math.max(0, visualPos) * fillScale}%`);
+    $('#ropeFillMe').css('width', `${Math.max(0, -clampedPos) * fillScale}%`);
+    $('#ropeFillOpp').css('width', `${Math.max(0, clampedPos) * fillScale}%`);
 
-    $('#fighterMe').toggleClass('leading', myLead > oppLead);
-    $('#fighterOpp').toggleClass('leading', oppLead > myLead);
+    $('#fighterMe').toggleClass('leading', myScore > oppScore);
+    $('#fighterOpp').toggleClass('leading', oppScore > myScore);
 
     if (data.scoredSide) {
         const iScored = (data.scoredSide === 'p1' && amIP1) || (data.scoredSide === 'p2' && !amIP1);

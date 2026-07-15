@@ -982,9 +982,11 @@ function applySolvedPuzzle(room, roomCode, match, token) {
         match.ropePosition += 1;
     }
 
+    // Thắng khi đủ điểm tuyệt đối (đua đến winScore), không cần dẫn đủ N vạch.
+    // ropePosition vẫn cập nhật để HUD kéo dây phản ánh ai đang hơn.
     let matchOver = false;
-    if (match.ropePosition <= -room.winScore) { match.winner = match.p1; matchOver = true; }
-    else if (match.ropePosition >= room.winScore) { match.winner = match.p2; matchOver = true; }
+    if ((match.scoreP1 || 0) >= room.winScore) { match.winner = match.p1; matchOver = true; }
+    else if ((match.scoreP2 || 0) >= room.winScore) { match.winner = match.p2; matchOver = true; }
 
     if (matchOver) {
         match.drawStreak = 0;
@@ -1007,7 +1009,7 @@ function applySolvedPuzzle(room, roomCode, match, token) {
             ropePosition: match.ropePosition, winScore: room.winScore,
             lastScorer: token, scoredSide
         });
-        resolveMatchWinner(room, roomCode, match, match.winner, 'Đã đạt mốc kéo dây.');
+        resolveMatchWinner(room, roomCode, match, match.winner, `Đã đạt ${room.winScore} điểm trước.`);
     } else {
         match.drawStreak = 0;
         assignNextPuzzle(match, roomCode, {
@@ -1015,8 +1017,8 @@ function applySolvedPuzzle(room, roomCode, match, token) {
             lastScorer: token,
             scoredSide,
             message: scoredSide === 'p1'
-                ? `${match.p1.name} giải xong! Dây lệch về phía họ.`
-                : `${match.p2.name} giải xong! Dây lệch về phía họ.`
+                ? `${match.p1.name} giải xong! ${match.scoreP1}–${match.scoreP2}`
+                : `${match.p2.name} giải xong! ${match.scoreP1}–${match.scoreP2}`
         });
     }
 }
