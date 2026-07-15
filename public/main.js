@@ -36,6 +36,12 @@ let boardOrientation = 'white';
 let currentPuzzleSeed = null;
 let submitInFlight = false;
 let puzzleEpoch = 0; // tăng mỗi lần loadPuzzle — bỏ qua ACK cũ
+let currentLevel = null;
+let puzzleLoadToken = 0; // hủy callback gameStart/spectateStart cũ
+let lastScoreFxKey = null; // chống double rope SFX
+let lastRopePosition = 0;
+let syncRequestPending = false;
+let timerExpiredSyncAt = 0;
 
 let globalLeaderboard = { daily: {}, weekly: {}, monthly: {}, periods: {} };
 let currentLbTab = 'daily';
@@ -291,8 +297,18 @@ function stopPuzzleTimer() {
     }
 }
 
+function requestMatchSync(reason) {
+    if (!myRoomCode || isSpectator || !socket.connected) return;
+    if (syncRequestPending) return;
+    syncRequestPending = true;
+    console.warn('requestMatchSync', reason || '');
+    socket.emit('reconnectUser', { roomCode: myRoomCode, token: myToken });
+    setTimeout(() => { syncRequestPending = false; }, 2000);
+}
+
 function startPuzzleTimer(deadlineAt, timeLimitMs) {
     puzzleDeadlineAt = deadlineAt || (Date.now() + (timeLimitMs || 60000));
+    timerExpiredSyncAt = 0;
     stopPuzzleTimer();
 
     const render = () => {
@@ -309,6 +325,17 @@ function startPuzzleTimer(deadlineAt, timeLimitMs) {
         if (remainingMs <= 0) {
             resetUrgentMemory();
             stopPuzzleTimer();
+            // Client hết giờ mà chưa nhận update_game → tự sync (timeout/đối thủ ghi điểm)
+            if (!isSpectator && $('#gameArea').is(':visible') && !timerExpiredSyncAt) {
+                timerExpiredSyncAt = Date.now();
+                const roundAtExpire = currentPuzzleRound;
+                const seedAtExpire = currentPuzzleSeed;
+                setTimeout(() => {
+                    if (!$('#gameArea').is(':visible') || isSpectator) return;
+                    if (currentPuzzleRound !== roundAtExpire || currentPuzzleSeed !== seedAtExpire) return;
+                    requestMatchSync('timer_expired');
+                }, 1500);
+            }
         }
     };
 
@@ -326,6 +353,7 @@ function loadPuzzlesForLevel(level, callback) {
         callback(puzzles);
     }).fail(() => {
         $('#status').text('Không tải được bài tập. Thử tải lại trang.');
+        if (typeof callback === 'function') callback(null);
     });
 }
 
@@ -601,6 +629,8 @@ socket.on('connect_error', () => {
 
 socket.on('disconnect', () => {
     stopPuzzleTimer();
+    moveSubmitPending = false;
+    submitInFlight = false;
     if ($('#lobby').is(':visible')) {
         $('#lobbyMsg').text('Mất kết nối máy chủ. Đang thử kết nối lại...');
     }
@@ -765,20 +795,48 @@ socket.on('gameStart', (data) => {
     isSpectator = false;
     moveSubmitPending = false;
     submitInFlight = false;
+    syncRequestPending = false;
     currentMatchId = data.matchId || null;
     $('#lobby').hide(); $('#waitingRoom').hide(); $('#bracketArea').hide(); $('#gameArea').show();
     $('#exitSpectateBtn').hide(); $('#emojiPanel').show(); 
-    currentWinScore = data.winScore; currentPuzzleRound = data.puzzleRound; amIP1 = data.isP1; 
+    currentWinScore = data.winScore;
+    amIP1 = data.isP1; 
     currentRoundMode = data.roundMode || 'regular';
+    if (data.level != null) currentLevel = data.level;
+    lastScoreFxKey = null;
     window._lastScoreP1 = data.scoreP1 || 0;
     window._lastScoreP2 = data.scoreP2 || 0;
+    if (data.ropePosition != null) lastRopePosition = data.ropePosition;
     $('#myNameDisplay').text('Bạn');
     $('#opponentNameDisplay').text(data.opponentName || 'Đối thủ');
     $('#status').text("Đang tải dữ liệu cờ...").removeClass('disconnect-warn');
     startPuzzleTimer(data.deadlineAt, data.timeLimitMs);
     resetUrgentMemory();
+
+    const loadToken = ++puzzleLoadToken;
+    const expectedRound = data.puzzleRound;
+    const expectedSeed = data.puzzleSeed;
+    // Gán round tạm để timer/HUD khớp; board chỉ load nếu token còn hiệu lực
+    if (data.puzzleRound != null) currentPuzzleRound = data.puzzleRound;
+
     loadPuzzlesForLevel(data.level, function(puzzles) {
-        puzzleList = puzzles; isMyTurnToSolve = true;
+        if (loadToken !== puzzleLoadToken) return; // bị update_game / gameStart mới hơn hủy
+        if (!puzzles || !puzzles.length) {
+            $('#status').text('Không tải được bài tập. Đang thử đồng bộ lại...');
+            requestMatchSync('puzzles_load_fail');
+            return;
+        }
+        // Đã sang bài mới hơn trong lúc tải JSON → bỏ callback cũ
+        if (
+            (expectedRound != null && currentPuzzleRound > expectedRound) ||
+            (currentPuzzleSeed != null && expectedSeed != null
+                && currentPuzzleSeed !== expectedSeed
+                && currentPuzzleRound !== expectedRound)
+        ) {
+            return;
+        }
+        puzzleList = puzzles;
+        isMyTurnToSolve = true;
         updateMatchHud(data);
         loadPuzzle(data.puzzleSeed, data.acceptedMoves || []);
     });
@@ -791,17 +849,37 @@ socket.on('spectateStart', (data) => {
     currentMatchId = data.matchId || null;
     $('#lobby').hide(); $('#waitingRoom').hide(); $('#bracketArea').hide(); $('#gameArea').show();
     $('#exitSpectateBtn').show(); $('#emojiPanel').hide(); 
-    currentWinScore = data.winScore; currentPuzzleRound = data.puzzleRound; amIP1 = true; 
+    currentWinScore = data.winScore;
+    amIP1 = true; 
     currentRoundMode = data.roundMode || 'regular';
+    if (data.level != null) currentLevel = data.level;
     window._lastScoreP1 = data.scoreP1 || 0;
     window._lastScoreP2 = data.scoreP2 || 0;
+    if (data.ropePosition != null) lastRopePosition = data.ropePosition;
     $('#myNameDisplay').text((data.p1Name || 'P1') + ' (P1)');
     $('#opponentNameDisplay').text((data.p2Name || 'P2') + ' (P2)');
     $('#status').text("📺 Đang truyền hình trực tiếp...").removeClass('disconnect-warn');
     startPuzzleTimer(data.deadlineAt, data.timeLimitMs);
     resetUrgentMemory();
+
+    const loadToken = ++puzzleLoadToken;
+    const expectedRound = data.puzzleRound;
+    const expectedSeed = data.puzzleSeed;
+    if (data.puzzleRound != null) currentPuzzleRound = data.puzzleRound;
+
     loadPuzzlesForLevel(data.level, function(puzzles) {
-        puzzleList = puzzles; isMyTurnToSolve = false;
+        if (loadToken !== puzzleLoadToken) return;
+        if (!puzzles || !puzzles.length) return;
+        if (
+            (expectedRound != null && currentPuzzleRound > expectedRound) ||
+            (currentPuzzleSeed != null && expectedSeed != null
+                && currentPuzzleSeed !== expectedSeed
+                && currentPuzzleRound !== expectedRound)
+        ) {
+            return;
+        }
+        puzzleList = puzzles;
+        isMyTurnToSolve = false;
         updateMatchHud(data);
         loadPuzzle(data.puzzleSeed);
     });
@@ -817,36 +895,108 @@ socket.on('spectateEnd', (data) => {
 });
 
 socket.on('byeMatch', () => { $('#bracketStatus').html("<strong style='color:green;'>Bạn được đặc cách vòng này! Đang chờ đối thủ khác thi đấu...</strong>"); });
-socket.on('update_game', (data) => {
+
+/** Áp dụng puzzle/HUD từ server; bỏ qua nếu đã đúng seed+round (tránh double load ACK + update_game). */
+function applyGameUpdate(data, options = {}) {
+    if (!data || data.puzzleSeed == null) return false;
+    if (data.level != null) currentLevel = data.level;
+    if (data.matchId) currentMatchId = data.matchId;
+
+    const skipFx = !!(options.skipScoreFx || options.skipSfx);
+    const samePuzzle =
+        data.puzzleSeed === currentPuzzleSeed &&
+        data.puzzleRound != null &&
+        data.puzzleRound === currentPuzzleRound;
+
+    if (samePuzzle && !options.force) {
+        // Không flash scoredSide lần 2 (ACK next đã flash rồi)
+        updateMatchHud(data, { skipScoreFx: true });
+        if (data.deadlineAt) startPuzzleTimer(data.deadlineAt, data.timeLimitMs);
+        return false;
+    }
+
+    // Hủy mọi callback load puzzle cũ (gameStart đang tải JSON, ...)
+    puzzleLoadToken += 1;
     moveSubmitPending = false;
     submitInFlight = false;
+    syncRequestPending = false;
+    timerExpiredSyncAt = 0;
+
     const prevMode = currentRoundMode;
     if (data.roundMode) currentRoundMode = data.roundMode;
-    currentPuzzleRound = data.puzzleRound;
-    updateMatchHud(data);
+
     resetUrgentMemory();
     startPuzzleTimer(data.deadlineAt, data.timeLimitMs);
 
-    if (data.roundMode === 'sudden_death' && prevMode !== 'sudden_death') {
-        playSuddenDeath();
-    } else if (data.message && /hòa puzzle|Hết giờ/i.test(data.message)) {
-        playPuzzleDraw();
+    if (!options.skipSfx) {
+        if (data.roundMode === 'sudden_death' && prevMode !== 'sudden_death') {
+            playSuddenDeath();
+        } else if (data.message && /hòa puzzle|Hết giờ/i.test(data.message)) {
+            playPuzzleDraw();
+        }
     }
 
-    $('#status').text(isSpectator ? "📺 Thế trận vừa thay đổi!" : "Thế trận đã thay đổi!").removeClass('disconnect-warn');
-    loadPuzzle(data.puzzleSeed);
-    if (data.message) {
-        $('#status').text(data.message);
+    const defaultStatus = isSpectator ? '📺 Thế trận vừa thay đổi!' : 'Thế trận đã thay đổi!';
+    $('#status').text(data.message || defaultStatus).removeClass('disconnect-warn');
+
+    const finishWithBoard = () => {
+        if (data.puzzleRound != null) currentPuzzleRound = data.puzzleRound;
+        updateMatchHud(data, { skipScoreFx: skipFx });
+    };
+
+    if (loadPuzzle(data.puzzleSeed)) {
+        finishWithBoard();
+        return true;
     }
+
+    // Chưa có puzzle list — khóa bàn, tải rồi mới commit round
+    isMyTurnToSolve = false;
+    updateMatchHud({
+        scoreP1: data.scoreP1,
+        scoreP2: data.scoreP2,
+        ropePosition: data.ropePosition,
+        winScore: data.winScore,
+        puzzleRound: currentPuzzleRound,
+        roundMode: data.roundMode
+    }, { skipScoreFx: true });
+
+    const level = data.level != null ? data.level : currentLevel;
+    if (level == null) {
+        requestMatchSync('no_level_for_puzzles');
+        return false;
+    }
+
+    const loadToken = ++puzzleLoadToken;
+    const expectedRound = data.puzzleRound;
+    const expectedSeed = data.puzzleSeed;
+    loadPuzzlesForLevel(level, (puzzles) => {
+        if (loadToken !== puzzleLoadToken) return;
+        if (!puzzles || !puzzles.length) {
+            requestMatchSync('puzzles_empty');
+            return;
+        }
+        if (expectedRound != null && currentPuzzleRound > expectedRound) return;
+        puzzleList = puzzles;
+        if (!loadPuzzle(expectedSeed)) return;
+        if (expectedRound != null) currentPuzzleRound = expectedRound;
+        updateMatchHud(data, { skipScoreFx: skipFx });
+    });
+    return true;
+}
+
+socket.on('update_game', (data) => {
+    applyGameUpdate(data);
 });
 socket.on('scoreUpdate', (data) => {
     updateMatchHud(data);
 });
 socket.on('matchResult', (data) => {
+    puzzleLoadToken += 1;
     stopPuzzleTimer();
     resetUrgentMemory();
     moveSubmitPending = false;
     submitInFlight = false;
+    syncRequestPending = false;
     isMyTurnToSolve = false; $('#gameArea').hide(); $('#bracketArea').show(); $('#bracketStatus').text(`Đang chờ các nhánh khác...`);
     renderBracket(data.bracket);
     if (data.reason) {
@@ -965,10 +1115,10 @@ function flashScore(side) {
     $marker.addClass('yank');
 }
 
-function updateMatchHud(data) {
+function updateMatchHud(data, hudOptions = {}) {
     if (!data) return;
     if (data.winScore) currentWinScore = data.winScore;
-    if (data.puzzleRound) currentPuzzleRound = data.puzzleRound;
+    if (data.puzzleRound != null) currentPuzzleRound = data.puzzleRound;
     if (data.roundMode) currentRoundMode = data.roundMode;
 
     const scoreP1 = data.scoreP1 != null ? data.scoreP1 : (window._lastScoreP1 || 0);
@@ -978,7 +1128,8 @@ function updateMatchHud(data) {
 
     const myScore = amIP1 ? scoreP1 : scoreP2;
     const oppScore = amIP1 ? scoreP2 : scoreP1;
-    const position = data.ropePosition != null ? data.ropePosition : 0;
+    const position = data.ropePosition != null ? data.ropePosition : lastRopePosition;
+    if (data.ropePosition != null) lastRopePosition = data.ropePosition;
     const visualPos = amIP1 ? position : -position;
     // Pips = tiến độ đua đến winScore (điểm tuyệt đối), không phải lead net.
     const myProgress = Math.min(myScore, currentWinScore);
@@ -1013,13 +1164,17 @@ function updateMatchHud(data) {
     $('#fighterMe').toggleClass('leading', myScore > oppScore);
     $('#fighterOpp').toggleClass('leading', oppScore > myScore);
 
-    if (data.scoredSide) {
-        const iScored = (data.scoredSide === 'p1' && amIP1) || (data.scoredSide === 'p2' && !amIP1);
-        const flashSide = isSpectator
-            ? (data.scoredSide === 'p1' ? 'me' : 'opp')
-            : (iScored ? 'me' : 'opp');
-        flashScore(flashSide);
-        playRopePull(flashSide === 'me');
+    if (data.scoredSide && !hudOptions.skipScoreFx) {
+        const fxKey = `${currentPuzzleRound}:${data.scoredSide}:${scoreP1}-${scoreP2}`;
+        if (fxKey !== lastScoreFxKey) {
+            lastScoreFxKey = fxKey;
+            const iScored = (data.scoredSide === 'p1' && amIP1) || (data.scoredSide === 'p2' && !amIP1);
+            const flashSide = isSpectator
+                ? (data.scoredSide === 'p1' ? 'me' : 'opp')
+                : (iScored ? 'me' : 'opp');
+            flashScore(flashSide);
+            playRopePull(flashSide === 'me');
+        }
     }
 }
 
@@ -1150,7 +1305,10 @@ function onCgAfterMove(orig, dest) {
 }
 
 function loadPuzzle(seed, acceptedMoves) {
-    if (!puzzleList || puzzleList.length === 0) return;
+    if (!puzzleList || puzzleList.length === 0) {
+        $('#status').text('Chưa tải được bộ bài — đang thử lại...');
+        return false;
+    }
     puzzleEpoch += 1;
     const epochAtLoad = puzzleEpoch;
     currentPuzzleSeed = seed;
@@ -1186,7 +1344,7 @@ function loadPuzzle(seed, acceptedMoves) {
     if (currentMoveIndex >= currentPuzzle.solution.length) {
         isMyTurnToSolve = false;
         syncGround({ lastMove });
-        return;
+        return true;
     }
 
     syncGround({ lastMove });
@@ -1202,6 +1360,7 @@ function loadPuzzle(seed, acceptedMoves) {
             ? '🔥 Nước đi sai lầm của địch! Trừng phạt ngay!'
             : 'Địch đáp trả! Tính tiếp đi!');
     }
+    return true;
 }
 
 function makeComputerMove(expectedEpoch) {
@@ -1249,26 +1408,35 @@ function makeComputerMove(expectedEpoch) {
 
 function submitPlayerMove(moveStr, playedIndex, onReject) {
     if (moveSubmitPending || submitInFlight || isSpectator) return;
+    if (!socket.connected) {
+        $('#status').text('Mất kết nối — đang chờ kết nối lại...');
+        syncGround();
+        return;
+    }
     moveSubmitPending = true;
     submitInFlight = true;
     syncGround();
 
     const epochAtSubmit = puzzleEpoch;
     const roundAtSubmit = currentPuzzleRound;
+    const seedAtSubmit = currentPuzzleSeed;
 
     const safety = setTimeout(() => {
         if (epochAtSubmit !== puzzleEpoch) return;
         if (!moveSubmitPending && !submitInFlight) return;
         moveSubmitPending = false;
         submitInFlight = false;
-        $('#status').text('Máy chủ phản hồi chậm — thử lại nước đi.');
-        syncGround();
+        // Undo nước local — tránh bàn lệch màu / không kéo được
+        if (typeof onReject === 'function') onReject({ timeout: true });
+        $('#status').text('Máy chủ phản hồi chậm — đang đồng bộ lại...');
+        requestMatchSync('submit_timeout');
     }, 8000);
 
     socket.emit('submit_move', {
         roomCode: myRoomCode,
         token: myToken,
         puzzleRound: roundAtSubmit,
+        puzzleSeed: seedAtSubmit,
         move: moveStr
     }, (res) => {
         clearTimeout(safety);
@@ -1277,6 +1445,12 @@ function submitPlayerMove(moveStr, playedIndex, onReject) {
         if (epochAtSubmit !== puzzleEpoch || roundAtSubmit !== currentPuzzleRound) {
             moveSubmitPending = false;
             submitInFlight = false;
+            // Nếu ACK mang sync/next mới hơn state hiện tại (hiếm) thì áp dụng
+            if (res && res.next && res.next.puzzleRound > currentPuzzleRound) {
+                applyGameUpdate(res.next);
+            } else if (res && res.sync && res.sync.puzzleRound > currentPuzzleRound) {
+                applyGameUpdate(res.sync, { skipSfx: true, skipScoreFx: true });
+            }
             return;
         }
 
@@ -1284,6 +1458,12 @@ function submitPlayerMove(moveStr, playedIndex, onReject) {
         submitInFlight = false;
 
         if (!res || !res.ok) {
+            // Lệch vòng với server → tự kéo puzzle hiện tại về, tránh kẹt bàn cũ
+            if (res && res.desync && res.sync) {
+                applyGameUpdate(res.sync, { skipSfx: true, skipScoreFx: true });
+                $('#status').text('Đã đồng bộ bài mới — tiếp tục giải!');
+                return;
+            }
             if (typeof onReject === 'function') onReject(res);
             if (res && res.mistake) {
                 isMyTurnToSolve = false;
@@ -1296,11 +1476,27 @@ function submitPlayerMove(moveStr, playedIndex, onReject) {
         }
 
         if (res.solved) {
-            // Chỉ khóa UI chờ update_game — KHÔNG set currentMoveIndex = length
-            // (ACK đến sau update_game trước đây làm hỏng computer move puzzle mới)
+            // Ưu tiên next trong ACK — không phụ thuộc race với update_game
+            if (res.next) {
+                applyGameUpdate(res.next);
+                return;
+            }
+            if (res.matchOver) {
+                isMyTurnToSolve = false;
+                $('#status').text('Tuyệt vời! Đang kết thúc trận...');
+                syncGround();
+                return;
+            }
+            // Fallback: chờ update_game; nếu không tới thì reconnect sync
             isMyTurnToSolve = false;
-            $('#status').text('Tuyệt vời! Đang giật dây kéo co...');
+            $('#status').text('Tuyệt vời! Đang chuyển bài...');
             syncGround();
+            const waitEpoch = puzzleEpoch;
+            const waitRound = currentPuzzleRound;
+            setTimeout(() => {
+                if (puzzleEpoch !== waitEpoch || currentPuzzleRound !== waitRound) return;
+                requestMatchSync('solved_no_next');
+            }, 1500);
             return;
         }
 

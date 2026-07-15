@@ -906,9 +906,44 @@ function handlePuzzleTimeout(roomCode, match) {
     });
 }
 
+function pickNextPuzzleSeed(match, room) {
+    const list = puzzleCache[Number(room.level)];
+    const size = (list && list.length) || 0;
+    const prevSeed = match.currentSeed;
+    let seed = crypto.randomInt(0, 1000000);
+    // Tránh trùng seed / trùng index puzzle liền kề (cảm giác "không sang bài").
+    if (size > 1 && prevSeed != null) {
+        for (let i = 0; i < 8; i++) {
+            if (seed !== prevSeed && (seed % size) !== (prevSeed % size)) break;
+            seed = crypto.randomInt(0, 1000000);
+        }
+    }
+    return seed;
+}
+
+function buildPuzzleUpdatePayload(match, room, options = {}) {
+    const payload = {
+        level: room.level,
+        matchId: match.id || null,
+        ropePosition: match.ropePosition,
+        scoreP1: match.scoreP1 || 0,
+        scoreP2: match.scoreP2 || 0,
+        winScore: room.winScore,
+        puzzleSeed: match.currentSeed,
+        puzzleRound: match.puzzleRound,
+        roundMode: match.roundMode,
+        timeLimitMs: match.timeLimitMs,
+        deadlineAt: match.deadlineAt,
+        lastScorer: options.lastScorer || null,
+        scoredSide: options.scoredSide || null
+    };
+    if (options.message) payload.message = options.message;
+    return payload;
+}
+
 function assignNextPuzzle(match, roomCode, options = {}) {
     const room = rooms[roomCode];
-    if (!room) return;
+    if (!room) return null;
 
     const mode = options.mode || 'regular';
     const timeLimitMs = mode === 'sudden_death' ? SUDDEN_DEATH_TIME_MS : REGULAR_PUZZLE_TIME_MS;
@@ -916,7 +951,7 @@ function assignNextPuzzle(match, roomCode, options = {}) {
 
     match.roundMode = mode;
     match.timeLimitMs = timeLimitMs;
-    match.currentSeed = crypto.randomInt(0, 1000000);
+    match.currentSeed = pickNextPuzzleSeed(match, room);
     match.deadlineAt = Date.now() + timeLimitMs;
     match.hadMoveP1 = false;
     match.hadMoveP2 = false;
@@ -935,26 +970,14 @@ function assignNextPuzzle(match, roomCode, options = {}) {
 
     persistRoom(roomCode);
 
+    const payload = buildPuzzleUpdatePayload(match, room, options);
     if (!options.silent) {
-        const payload = {
-            ropePosition: match.ropePosition,
-            scoreP1: match.scoreP1 || 0,
-            scoreP2: match.scoreP2 || 0,
-            winScore: room.winScore,
-            puzzleSeed: match.currentSeed,
-            puzzleRound: match.puzzleRound,
-            roundMode: match.roundMode,
-            timeLimitMs: match.timeLimitMs,
-            deadlineAt: match.deadlineAt,
-            lastScorer: options.lastScorer || null,
-            scoredSide: options.scoredSide || null
-        };
-        if (options.message) payload.message = options.message;
         const event = options.payloadType || 'update_game';
         if (match.p1?.token) emitToToken(match.p1.token, event, payload);
         if (match.p2?.token) emitToToken(match.p2.token, event, payload);
         io.to('watch_' + match.id).emit(event, payload);
     }
+    return payload;
 }
 
 function applySolvedPuzzle(room, roomCode, match, token) {
@@ -970,7 +993,7 @@ function applySolvedPuzzle(room, roomCode, match, token) {
         match.drawStreak = 0;
         const winner = token === match.p1.token ? match.p1 : match.p2;
         resolveMatchWinner(room, roomCode, match, winner, 'Sudden Death: giải đúng trước và chiến thắng!');
-        return;
+        return { matchOver: true };
     }
 
     const scoredSide = token === match.p1.token ? 'p1' : 'p2';
@@ -1010,17 +1033,19 @@ function applySolvedPuzzle(room, roomCode, match, token) {
             lastScorer: token, scoredSide
         });
         resolveMatchWinner(room, roomCode, match, match.winner, `Đã đạt ${room.winScore} điểm trước.`);
-    } else {
-        match.drawStreak = 0;
-        assignNextPuzzle(match, roomCode, {
-            mode: 'regular',
-            lastScorer: token,
-            scoredSide,
-            message: scoredSide === 'p1'
-                ? `${match.p1.name} giải xong! ${match.scoreP1}–${match.scoreP2}`
-                : `${match.p2.name} giải xong! ${match.scoreP1}–${match.scoreP2}`
-        });
+        return { matchOver: true };
     }
+
+    match.drawStreak = 0;
+    const next = assignNextPuzzle(match, roomCode, {
+        mode: 'regular',
+        lastScorer: token,
+        scoredSide,
+        message: scoredSide === 'p1'
+            ? `${match.p1.name} giải xong! ${match.scoreP1}–${match.scoreP2}`
+            : `${match.p2.name} giải xong! ${match.scoreP1}–${match.scoreP2}`
+    });
+    return { matchOver: false, next };
 }
 
 function restorePlayingRoomTimers(roomCode, room) {
@@ -1405,8 +1430,16 @@ io.on('connection', (socket) => {
             ack({ ok: false, error: 'Trận không còn hiệu lực.' });
             return;
         }
-        if (match.puzzleRound !== data.puzzleRound) {
-            ack({ ok: false, error: 'Puzzle đã đổi — đồng bộ lại.' });
+
+        const seedMismatch = data.puzzleSeed != null && match.currentSeed != null
+            && Number(data.puzzleSeed) !== Number(match.currentSeed);
+        if (match.puzzleRound !== data.puzzleRound || seedMismatch) {
+            ack({
+                ok: false,
+                error: 'Puzzle đã đổi — đồng bộ lại.',
+                desync: true,
+                sync: buildPuzzleUpdatePayload(match, room)
+            });
             return;
         }
 
@@ -1452,8 +1485,13 @@ io.on('connection', (socket) => {
         const solved = playerMoves.length >= totalNeeded;
 
         if (solved) {
-            applySolvedPuzzle(room, rCode, match, data.token);
-            ack({ ok: true, solved: true });
+            const result = applySolvedPuzzle(room, rCode, match, data.token) || {};
+            ack({
+                ok: true,
+                solved: true,
+                matchOver: !!result.matchOver,
+                next: result.next || null
+            });
             return;
         }
 
