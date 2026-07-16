@@ -4,7 +4,10 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { Server } = require('socket.io');
-const { init: initFirebase, dbGet, dbSet, dbRemove, isUsingAdmin } = require('./firebaseDb');
+const { createPersistQueue } = require('./lib/persistQueue');
+const { init: initFirebase, dbGet, dbSet, dbRemove, isUsingAdmin } = process.env.CHESS_TOW_TEST === '1'
+    ? require('./test/mockFirebase')
+    : require('./firebaseDb');
 
 const app = express();
 const server = http.createServer(app);
@@ -19,13 +22,13 @@ initFirebase();
 
 const rooms = {};
 const playerRegistry = {};
-const MAX_PLAYERS = 64;
+const MAX_PLAYERS = 16;
 const WAITING_DISCONNECT_GRACE_MS = 60 * 1000;
 const PLAYING_DISCONNECT_GRACE_MS = 45 * 1000;
-const TOURNAMENT_START_COUNTDOWN = 10;
-const ROUND_START_COUNTDOWN = 5;
-const REGULAR_PUZZLE_TIME_MS = 60 * 1000;
-const SUDDEN_DEATH_TIME_MS = 30 * 1000;
+const TOURNAMENT_START_COUNTDOWN = Number(process.env.TOW_TOURNAMENT_COUNTDOWN ?? 10);
+const ROUND_START_COUNTDOWN = Number(process.env.TOW_ROUND_COUNTDOWN ?? 5);
+const REGULAR_PUZZLE_TIME_MS = Number(process.env.TOW_PUZZLE_TIME_MS ?? 60 * 1000);
+const SUDDEN_DEATH_TIME_MS = Number(process.env.TOW_SD_TIME_MS ?? 30 * 1000);
 const MAX_REGULAR_DRAWS = 3;
 const MAX_NAME_LENGTH = 15;
 
@@ -100,7 +103,9 @@ dbGet('players').then((data) => {
     }
 }).catch((error) => { console.error('❌ Lỗi Firebase players:', error.message); });
 
-setInterval(() => ensureLeaderboardPeriods(), 60 * 1000);
+if (process.env.CHESS_TOW_TEST !== '1') {
+    setInterval(() => ensureLeaderboardPeriods(), 60 * 1000);
+}
 
 function getPeriodKeys(date = new Date()) {
     const vn = new Date(date.getTime() + 7 * 60 * 60 * 1000);
@@ -453,11 +458,33 @@ function generateNextRound(room) {
     room.bracket.push(matches);
 }
 
+function serializePlayer(p) {
+    if (!p) return p;
+    return {
+        id: p.id,
+        token: p.token,
+        name: p.name,
+        compete: p.compete !== false,
+        isDoubleLoss: !!p.isDoubleLoss
+    };
+}
+
 function serializeMatch(match) {
     if (!match) return match;
-    const { timerId, ...rest } = match;
-    if (rest.winner && !rest.settled) rest.settled = true;
-    return rest;
+    const {
+        timerId,
+        disconnectTimer,
+        advanceTimer,
+        ...rest
+    } = match;
+    const out = { ...rest };
+    if (out.p1) out.p1 = serializePlayer(out.p1);
+    if (out.p2) out.p2 = serializePlayer(out.p2);
+    if (out.winner) out.winner = serializePlayer(out.winner);
+    // Bỏ field runtime / không JSON-safe
+    delete out.timerId;
+    if (out.winner && !out.settled) out.settled = true;
+    return out;
 }
 
 function serializeRoom(room) {
@@ -473,12 +500,8 @@ function serializeRoom(room) {
     return {
         roomCode: room.roomCode,
         hostToken: room.hostToken,
-        players: room.players.map(p => ({
-            id: p.id, token: p.token, name: p.name, compete: p.compete !== false
-        })),
-        activePlayers: (room.activePlayers || []).map(p => ({
-            id: p.id, token: p.token, name: p.name, compete: p.compete !== false
-        })),
+        players: room.players.map(serializePlayer),
+        activePlayers: (room.activePlayers || []).map(serializePlayer),
         bracket,
         currentRoundMatches: currentIsLast
             ? lastRound
@@ -529,10 +552,16 @@ function deserializeRoom(code, data) {
     };
 }
 
+const persistQueue = createPersistQueue((key, payload) => dbSet(key, payload));
+
 function persistRoom(roomCode) {
     const room = rooms[roomCode];
     if (!room) return Promise.resolve();
-    return dbSet(`rooms/${roomCode}`, serializeRoom(room)).catch(err => {
+    return persistQueue.persist(`rooms/${roomCode}`, () => {
+        const current = rooms[roomCode];
+        if (!current) return null;
+        return serializeRoom(current);
+    }).catch(err => {
         console.error(`❌ Lưu phòng [${roomCode}]:`, err.message);
     });
 }
@@ -544,6 +573,7 @@ function removeRoom(roomCode) {
         (room.currentRoundMatches || []).forEach(clearMatchTimer);
     }
     delete rooms[roomCode];
+    persistQueue.clear(`rooms/${roomCode}`);
     dbRemove(`rooms/${roomCode}`).catch(err => {
         console.error(`❌ Xóa phòng [${roomCode}]:`, err.message);
     });
@@ -588,15 +618,41 @@ async function loadRoomsFromFirebase() {
     }
 }
 
-function buildBracketPayload(room) {
+function slimBracketPlayer(p) {
+    if (!p) return null;
     return {
-        bracket: room.bracket,
-        currentRoundIndex: Math.max(0, room.bracket.length - 1)
+        token: p.token || null,
+        name: p.name || '---',
+        isDoubleLoss: !!p.isDoubleLoss
+    };
+}
+
+function slimBracketMatch(m) {
+    if (!m) return null;
+    return {
+        id: m.id,
+        p1: slimBracketPlayer(m.p1),
+        p2: slimBracketPlayer(m.p2),
+        winner: m.winner ? slimBracketPlayer(m.winner) : null,
+        isBye: !!m.isBye
+    };
+}
+
+function buildBracketPayload(room) {
+    // Chỉ gửi field cần cho UI — tránh log/progress/events làm lag socket
+    return {
+        bracket: (room.bracket || []).map(round => (round || []).map(slimBracketMatch)),
+        currentRoundIndex: Math.max(0, (room.bracket || []).length - 1)
     };
 }
 
 function runCountdown(roomCode, seconds, eventName, onDone) {
-    let remaining = seconds;
+    let remaining = Math.max(0, Number(seconds) || 0);
+    if (remaining <= 0) {
+        io.to(roomCode).emit(eventName, { seconds: 0, done: true });
+        onDone();
+        return;
+    }
     io.to(roomCode).emit(eventName, { seconds: remaining });
     const interval = setInterval(() => {
         remaining--;
@@ -613,6 +669,8 @@ function runCountdown(roomCode, seconds, eventName, onDone) {
 function recordElimination(room, loserPlayer) {
     if (!loserPlayer || loserPlayer.isDoubleLoss) return;
     if (!room.eliminationOrder) room.eliminationOrder = [];
+    // Tránh ghi trùng cùng một người (vd. đồng thua ghi 2 lần + vòng sau)
+    if (room.eliminationOrder.includes(loserPlayer.name)) return;
     room.eliminationOrder.push(loserPlayer.name);
 }
 
@@ -842,9 +900,15 @@ function resolveMatchWinner(room, roomCode, match, winner, reasonMessage) {
     clearMatchTimer(match);
     match.winner = winner;
 
-    if (match.p1 && match.p2 && !winner.isDoubleLoss) {
-        const loser = winner.token === match.p1.token ? match.p2 : match.p1;
-        recordElimination(room, loser);
+    if (match.p1 && match.p2) {
+        if (winner.isDoubleLoss) {
+            // Đồng thua: cả hai vào bảng xếp hạng (trước đây bị mất hạng)
+            recordElimination(room, match.p1);
+            recordElimination(room, match.p2);
+        } else {
+            const loser = winner.token === match.p1.token ? match.p2 : match.p1;
+            recordElimination(room, loser);
+        }
     }
 
     if (!winner.isDoubleLoss) addScore(winner.name, 2);
@@ -865,6 +929,7 @@ function resolveMatchWinner(room, roomCode, match, winner, reasonMessage) {
 
     const payload = {
         winner: winner.name,
+        winnerToken: winner.isDoubleLoss ? null : (winner.token || null),
         bracket: buildBracketPayload(room),
         reason: reasonMessage,
         isDoubleLoss: !!winner.isDoubleLoss,
@@ -1017,6 +1082,7 @@ function applySolvedPuzzle(room, roomCode, match, token) {
             emitToToken(match.p1.token, 'scoreUpdate', {
                 scoreP1: match.scoreP1, scoreP2: match.scoreP2,
                 ropePosition: match.ropePosition, winScore: room.winScore,
+                puzzleRound: match.puzzleRound, matchId: match.id,
                 lastScorer: token, scoredSide
             });
         }
@@ -1024,12 +1090,14 @@ function applySolvedPuzzle(room, roomCode, match, token) {
             emitToToken(match.p2.token, 'scoreUpdate', {
                 scoreP1: match.scoreP1, scoreP2: match.scoreP2,
                 ropePosition: match.ropePosition, winScore: room.winScore,
+                puzzleRound: match.puzzleRound, matchId: match.id,
                 lastScorer: token, scoredSide
             });
         }
         io.to('watch_' + match.id).emit('scoreUpdate', {
             scoreP1: match.scoreP1, scoreP2: match.scoreP2,
             ropePosition: match.ropePosition, winScore: room.winScore,
+            puzzleRound: match.puzzleRound, matchId: match.id,
             lastScorer: token, scoredSide
         });
         resolveMatchWinner(room, roomCode, match, match.winner, `Đã đạt ${room.winScore} điểm trước.`);
@@ -1196,6 +1264,36 @@ io.on('connection', (socket) => {
                 socket.emit('showBracket', buildBracketPayload(room));
             }
         }
+    });
+
+    /** Sync nhẹ giữa trận — không emit gameStart (tránh remount board + race điểm). */
+    socket.on('requestMatchSync', (data) => {
+        const roomCode = normalizeRoomCode(data.roomCode);
+        const room = rooms[roomCode];
+        if (!room || room.status !== 'playing') return;
+
+        const player = room.players.find(p => p.token === data.token);
+        if (!player) return;
+
+        player.id = socket.id;
+        touchPlayer(data.token);
+        joinPlayerChannels(socket, data.token, roomCode);
+
+        const match = findActiveMatchForPlayer(room, data.token);
+        if (!match || match.winner || match.isBye || match.currentSeed == null) {
+            socket.emit('showBracket', buildBracketPayload(room));
+            return;
+        }
+
+        const isP1 = match.p1.token === data.token;
+        const progress = (match.progress && match.progress[data.token]) || [];
+        socket.emit('matchSync', {
+            ...buildPuzzleUpdatePayload(match, room),
+            isP1,
+            opponentName: (isP1 ? match.p2 : match.p1)?.name || '---',
+            acceptedMoves: progress,
+            message: 'Đã đồng bộ lại thế trận.'
+        });
     });
 
     socket.on('leaveRoom', (data) => {
@@ -1525,8 +1623,42 @@ io.on('connection', (socket) => {
 
 loadPuzzleCache();
 
-loadRoomsFromFirebase().then(() => {
-    server.listen(process.env.PORT || 3000, () => {
-        console.log(`🚀 Server chạy! (tối đa ${MAX_PLAYERS} người/giải, Admin SDK: ${isUsingAdmin() ? 'ON' : 'OFF'})`);
+function startListening(port = process.env.PORT || 3000) {
+    return new Promise((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(port, () => {
+            server.removeListener('error', reject);
+            const addr = server.address();
+            const actualPort = typeof addr === 'object' && addr ? addr.port : port;
+            console.log(`🚀 Server chạy! port=${actualPort} (tối đa ${MAX_PLAYERS} người/giải, Admin SDK: ${isUsingAdmin() ? 'ON' : 'OFF'})`);
+            resolve(actualPort);
+        });
     });
-});
+}
+
+if (require.main === module) {
+    loadRoomsFromFirebase().then(() => startListening()).catch(err => {
+        console.error('❌ Không khởi động được server:', err);
+        process.exit(1);
+    });
+}
+
+module.exports = {
+    app,
+    server,
+    io,
+    rooms,
+    playerRegistry,
+    loadPuzzleCache,
+    startListening,
+    persistRoom,
+    buildBracketPayload,
+    buildPuzzleUpdatePayload,
+    serializeRoom,
+    serializeMatch,
+    clearMatchTimer,
+    clearAdvanceTimer,
+    REGULAR_PUZZLE_TIME_MS,
+    ROUND_START_COUNTDOWN,
+    TOURNAMENT_START_COUNTDOWN
+};

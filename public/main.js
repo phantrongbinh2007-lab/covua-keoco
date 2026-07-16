@@ -5,6 +5,11 @@ import {
     playSuddenDeath, playTimerUrgent, resetUrgentMemory,
     playMatchWin, playMatchLose, playPuzzleDraw
 } from './sfx.js';
+import {
+    isStaleMatchPayload as isStaleMatchPayloadCore,
+    nextMatchStateVersion,
+    resolveHudScores
+} from './matchState.mjs';
 
 const $ = window.jQuery;
 const Chess = window.Chess;
@@ -52,6 +57,27 @@ let nameLocked = false;
 let currentMatchId = null;
 let moveSubmitPending = false;
 let iAmCompeting = true; // false = ban tổ chức only
+/** Phiên bản state trận: round*1000 + tổng điểm — chặn packet cũ ghi đè điểm (4→3). */
+let lastMatchStateVersion = 0;
+
+function staleCtx(extra = {}) {
+    return {
+        currentMatchId,
+        lastMatchStateVersion,
+        lastScoreP1: window._lastScoreP1 || 0,
+        lastScoreP2: window._lastScoreP2 || 0,
+        currentPuzzleRound,
+        ...extra
+    };
+}
+
+function isStaleMatchPayload(data, options = {}) {
+    return isStaleMatchPayloadCore(data, staleCtx(options));
+}
+
+function commitMatchStateVersion(data) {
+    lastMatchStateVersion = nextMatchStateVersion(data, staleCtx());
+}
 
 let myToken = localStorage.getItem('chessTugToken');
 if (!myToken) {
@@ -96,7 +122,7 @@ let joinTimeoutId = null;
 let pendingCreate = null;
 let createTimeoutId = null;
 let autoReconnectCancelled = false;
-const MAX_PLAYERS = 64;
+const MAX_PLAYERS = 16;
 
 function applyJoinedRoom(data) {
     if (!data || !data.roomCode) return;
@@ -302,7 +328,8 @@ function requestMatchSync(reason) {
     if (syncRequestPending) return;
     syncRequestPending = true;
     console.warn('requestMatchSync', reason || '');
-    socket.emit('reconnectUser', { roomCode: myRoomCode, token: myToken });
+    // Sync nhẹ — không dùng reconnectUser/gameStart (tránh remount + ghi đè điểm cũ)
+    socket.emit('requestMatchSync', { roomCode: myRoomCode, token: myToken, reason: reason || '' });
     setTimeout(() => { syncRequestPending = false; }, 2000);
 }
 
@@ -613,7 +640,15 @@ socket.on('connect', () => {
         return;
     }
     if (myRoomCode) {
+        // Đang trong trận: chỉ sync nhẹ. Ngoài trận: reconnectUser khôi phục waiting/bracket.
+        if ($('#gameArea').is(':visible') && currentMatchId && !isSpectator) {
+            requestMatchSync('socket_reconnect');
+            return;
+        }
+        if (syncRequestPending) return;
+        syncRequestPending = true;
         socket.emit('reconnectUser', { roomCode: myRoomCode, token: myToken });
+        setTimeout(() => { syncRequestPending = false; }, 2000);
         return;
     }
     if ($('#lobby').is(':visible') && !$('#lobbyMsg').text().includes('Đang')) {
@@ -792,6 +827,16 @@ function renderBracket(data) {
 }
 
 socket.on('gameStart', (data) => {
+    // Trận mới (matchId khác) được phép reset điểm; cùng trận thì chặn snapshot cũ.
+    if (isStaleMatchPayload(data, { allowNewMatch: true })) {
+        console.warn('Ignoring stale gameStart', data && data.puzzleRound, data && data.scoreP1, data && data.scoreP2);
+        return;
+    }
+    const isNewMatch = !currentMatchId || (data.matchId && data.matchId !== currentMatchId);
+    if (isNewMatch) {
+        lastMatchStateVersion = 0;
+    }
+
     isSpectator = false;
     moveSubmitPending = false;
     submitInFlight = false;
@@ -804,8 +849,12 @@ socket.on('gameStart', (data) => {
     currentRoundMode = data.roundMode || 'regular';
     if (data.level != null) currentLevel = data.level;
     lastScoreFxKey = null;
-    window._lastScoreP1 = data.scoreP1 || 0;
-    window._lastScoreP2 = data.scoreP2 || 0;
+    // Chỉ ghi điểm sau khi đã xác nhận không stale
+    if (data.scoreP1 != null) window._lastScoreP1 = data.scoreP1;
+    else window._lastScoreP1 = window._lastScoreP1 || 0;
+    if (data.scoreP2 != null) window._lastScoreP2 = data.scoreP2;
+    else window._lastScoreP2 = window._lastScoreP2 || 0;
+    commitMatchStateVersion(data);
     if (data.ropePosition != null) lastRopePosition = data.ropePosition;
     $('#myNameDisplay').text('Bạn');
     $('#opponentNameDisplay').text(data.opponentName || 'Đối thủ');
@@ -835,6 +884,8 @@ socket.on('gameStart', (data) => {
         ) {
             return;
         }
+        // Snapshot này đã bị state mới hơn vượt qua trong lúc tải
+        if (isStaleMatchPayload(data)) return;
         puzzleList = puzzles;
         isMyTurnToSolve = true;
         updateMatchHud(data);
@@ -899,8 +950,13 @@ socket.on('byeMatch', () => { $('#bracketStatus').html("<strong style='color:gre
 /** Áp dụng puzzle/HUD từ server; bỏ qua nếu đã đúng seed+round (tránh double load ACK + update_game). */
 function applyGameUpdate(data, options = {}) {
     if (!data || data.puzzleSeed == null) return false;
+    if (isStaleMatchPayload(data)) {
+        console.warn('Ignoring stale game update', data.puzzleRound, data.scoreP1, data.scoreP2);
+        return false;
+    }
     if (data.level != null) currentLevel = data.level;
     if (data.matchId) currentMatchId = data.matchId;
+    commitMatchStateVersion(data);
 
     const skipFx = !!(options.skipScoreFx || options.skipSfx);
     const samePuzzle =
@@ -944,7 +1000,7 @@ function applyGameUpdate(data, options = {}) {
         updateMatchHud(data, { skipScoreFx: skipFx });
     };
 
-    if (loadPuzzle(data.puzzleSeed)) {
+    if (loadPuzzle(data.puzzleSeed, options.acceptedMoves)) {
         finishWithBoard();
         return true;
     }
@@ -976,8 +1032,9 @@ function applyGameUpdate(data, options = {}) {
             return;
         }
         if (expectedRound != null && currentPuzzleRound > expectedRound) return;
+        if (isStaleMatchPayload(data)) return;
         puzzleList = puzzles;
-        if (!loadPuzzle(expectedSeed)) return;
+        if (!loadPuzzle(expectedSeed, options.acceptedMoves)) return;
         if (expectedRound != null) currentPuzzleRound = expectedRound;
         updateMatchHud(data, { skipScoreFx: skipFx });
     });
@@ -987,7 +1044,22 @@ function applyGameUpdate(data, options = {}) {
 socket.on('update_game', (data) => {
     applyGameUpdate(data);
 });
+socket.on('matchSync', (data) => {
+    if (!data) return;
+    if (data.isP1 != null) amIP1 = !!data.isP1;
+    if (data.opponentName) $('#opponentNameDisplay').text(data.opponentName);
+    const needsRestore = Array.isArray(data.acceptedMoves) && data.acceptedMoves.length > 0
+        && data.puzzleSeed === currentPuzzleSeed;
+    applyGameUpdate(data, {
+        skipSfx: true,
+        skipScoreFx: true,
+        force: needsRestore,
+        acceptedMoves: data.acceptedMoves
+    });
+});
 socket.on('scoreUpdate', (data) => {
+    if (isStaleMatchPayload(data)) return;
+    commitMatchStateVersion(data);
     updateMatchHud(data);
 });
 socket.on('matchResult', (data) => {
@@ -997,18 +1069,25 @@ socket.on('matchResult', (data) => {
     moveSubmitPending = false;
     submitInFlight = false;
     syncRequestPending = false;
+    lastMatchStateVersion = 0;
+    currentMatchId = null;
+    window._lastScoreP1 = 0;
+    window._lastScoreP2 = 0;
     isMyTurnToSolve = false; $('#gameArea').hide(); $('#bracketArea').show(); $('#bracketStatus').text(`Đang chờ các nhánh khác...`);
     renderBracket(data.bracket);
     if (data.reason) {
         $('#bracketStatus').text(data.reason);
     }
-    if (data.matchId) currentMatchId = data.matchId;
 
-    const myName = (localStorage.getItem('chessTugName') || '').trim();
     if (data.isDoubleLoss) {
         playPuzzleDraw();
-    } else if (data.winner && myName && data.winner === myName) {
+    } else if (data.winnerToken && data.winnerToken === myToken) {
         playMatchWin();
+    } else if (!data.winnerToken && data.winner) {
+        // Fallback tên (payload cũ)
+        const myName = (localStorage.getItem('chessTugName') || '').trim();
+        if (myName && data.winner === myName) playMatchWin();
+        else playMatchLose();
     } else {
         playMatchLose();
     }
@@ -1118,13 +1197,18 @@ function flashScore(side) {
 function updateMatchHud(data, hudOptions = {}) {
     if (!data) return;
     if (data.winScore) currentWinScore = data.winScore;
-    if (data.puzzleRound != null) currentPuzzleRound = data.puzzleRound;
+    if (data.puzzleRound != null && data.puzzleRound >= currentPuzzleRound) {
+        currentPuzzleRound = data.puzzleRound;
+    }
     if (data.roundMode) currentRoundMode = data.roundMode;
 
-    const scoreP1 = data.scoreP1 != null ? data.scoreP1 : (window._lastScoreP1 || 0);
-    const scoreP2 = data.scoreP2 != null ? data.scoreP2 : (window._lastScoreP2 || 0);
-    if (data.scoreP1 != null) window._lastScoreP1 = data.scoreP1;
-    if (data.scoreP2 != null) window._lastScoreP2 = data.scoreP2;
+    const resolved = resolveHudScores(data, window._lastScoreP1 || 0, window._lastScoreP2 || 0);
+    const scoreP1 = resolved.scoreP1;
+    const scoreP2 = resolved.scoreP2;
+    if (!resolved.rejectedRegression) {
+        if (data.scoreP1 != null) window._lastScoreP1 = data.scoreP1;
+        if (data.scoreP2 != null) window._lastScoreP2 = data.scoreP2;
+    }
 
     const myScore = amIP1 ? scoreP1 : scoreP2;
     const oppScore = amIP1 ? scoreP2 : scoreP1;
@@ -1515,9 +1599,20 @@ function initBoard() {
     const el = document.getElementById('board');
     if (!el) return;
     if (ground) {
-        try { ground.destroy(); } catch (e) { /* ignore */ }
-        ground = null;
-        el.innerHTML = '';
+        try {
+            ground.set({
+                fen: game.fen(),
+                orientation: boardOrientation,
+                lastMove: undefined,
+                check: undefined,
+                selected: undefined
+            });
+            return;
+        } catch (e) {
+            try { ground.destroy(); } catch (err) { /* ignore */ }
+            ground = null;
+            el.innerHTML = '';
+        }
     }
     ground = Chessground(el, {
         fen: game.fen(),

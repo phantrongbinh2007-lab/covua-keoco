@@ -4,7 +4,9 @@
   "description": "Game cờ vua kéo co cho học viên Vua Lang Thang",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test --test-force-exit test/matchState.test.js test/persistQueue.test.js test/serializeRoom.test.js test/integration.socket.test.js",
+    "test:unit": "node --test --test-force-exit test/matchState.test.js test/persistQueue.test.js test/serializeRoom.test.js"
   },
   "keywords": [
     "chess",
@@ -19,5 +21,8 @@
     "firebase": "^12.15.0",
     "firebase-admin": "^13.10.0",
     "socket.io": "^4.2.0"
+  },
+  "devDependencies": {
+    "socket.io-client": "^4.8.3"
   }
 }
